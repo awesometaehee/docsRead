@@ -2,7 +2,10 @@ import { Extension, mergeAttributes, Node } from "@tiptap/core";
 import Paragraph from "@tiptap/extension-paragraph";
 import Color from "@tiptap/extension-color";
 import Image from "@tiptap/extension-image";
-import Table from "@tiptap/extension-table";
+import Heading from "@tiptap/extension-heading";
+import Table, { TableView } from "@tiptap/extension-table";
+import TextAlign from "@tiptap/extension-text-align";
+import type { Node as PMNode } from "@tiptap/pm/model";
 import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
@@ -94,6 +97,75 @@ const Columns = Node.create({
   renderHTML({ node }) { return ["div", { "data-columns": node.attrs.count, class: "cols", style: `column-count:${node.attrs.count}` }, 0]; },
 });
 
+/** 박스(틀·패널): 테두리, 둥근 위 모서리, 배경색, 용지 끝까지 채우기. 안에 무엇이든 넣을 수 있다. */
+export const Box = Node.create({
+  name: "box",
+  group: "block",
+  content: "block+",
+  defining: true,
+  addAttributes() {
+    const hidden = { rendered: false };
+    return {
+      border: { default: true, ...hidden }, borderColor: { default: "#939598", ...hidden }, borderW: { default: 0.5, ...hidden },
+      round: { default: false, ...hidden }, bg: { default: null, ...hidden }, pad: { default: 7, ...hidden }, bleed: { default: false, ...hidden },
+    };
+  },
+  parseHTML() { return [{ tag: "div[data-box]" }]; },
+  renderHTML({ node }) {
+    const a = node.attrs;
+    const style = [
+      a.border ? `border:${a.borderW}pt solid ${a.borderColor}` : "", a.bg ? `background:${a.bg}` : "",
+      a.round ? "border-radius:13pt 13pt 0 0" : "", `--bp:${a.pad}pt`,
+    ].filter(Boolean).join(";");
+    return ["div", { "data-box": "", class: `box${a.bleed ? " bleed" : ""}${a.round ? " round" : ""}`, style }, 0];
+  },
+});
+
+/** 캡션 그림: 사진(여러 장을 겹쳐 놓을 수 있다)과 그 아래 캡션 글. */
+export const Figure = Node.create({
+  name: "figure",
+  group: "block",
+  content: "inline*",
+  draggable: true,
+  addAttributes() {
+    const hidden = { rendered: false };
+    return { w: { default: 80, ...hidden }, h: { default: 50, ...hidden }, images: { default: [], ...hidden },
+      float: { default: null, ...hidden }, plain: { default: false, ...hidden } };   // plain = 캡션 자리 없이 그림만
+  },
+  parseHTML() { return [{ tag: "figure[data-figure]", contentElement: "figcaption" }]; },
+  renderHTML({ node }) {
+    const a = node.attrs as { w: number; h: number; float: string | null; plain: boolean; images: { src: string; x: number; y: number; w: number; h: number }[] };
+    const imgs = a.images.map((im) => ["img", { src: im.src, draggable: "false", style: `left:${(im.x / a.w) * 100}%;top:${(im.y / a.h) * 100}%;width:${(im.w / a.w) * 100}%;height:${(im.h / a.h) * 100}%` }]);
+    return ["figure", { "data-figure": "", class: `fig${a.plain ? " plain" : ""}`, style: `width:${a.w}pt${a.float ? `;float:${a.float}` : ""}` },
+      ["div", { class: "figbox", contenteditable: "false", style: `aspect-ratio:${a.w} / ${a.h}` }, ...imgs],
+      ["figcaption", 0]] as never;
+  },
+});
+
+/** 사진 묶음: 캡션 그림을 가로로 늘어놓는 상자. 옆에 글이 오도록 띄울 수 있다. */
+export const Gallery = Node.create({
+  name: "gallery",
+  group: "block",
+  content: "figure+",
+  addAttributes() {
+    const hidden = { rendered: false };
+    return { float: { default: null, ...hidden }, widthPct: { default: null, ...hidden }, bg: { default: null, ...hidden } };
+  },
+  parseHTML() { return [{ tag: "div[data-gallery]" }]; },
+  renderHTML({ node }) {
+    const a = node.attrs;
+    const style = [a.float ? `float:${a.float}` : "", a.widthPct ? `width:${a.widthPct}%` : "", a.bg ? `background:${a.bg}` : ""].filter(Boolean).join(";");
+    return ["div", { "data-gallery": "", class: `gallery${a.float ? " floated" : ""}`, style }, 0];
+  },
+});
+
+/** 제목 띠의 배경색을 바꿀 수 있게 한다. */
+const Head = Heading.extend({
+  addAttributes() {
+    return { ...this.parent?.(), bg: { default: null, renderHTML: (a: Record<string, unknown>) => (a.bg ? { style: `background:${a.bg}` } : {}) } };
+  },
+});
+
 const SVG = "http://www.w3.org/2000/svg ";
 type RItem = { k: string; b: number[]; d?: string; fill?: string; fo?: number; eo?: number; stroke?: string; sw?: number; so?: number;
   asset?: string; m?: number[]; spans?: { t: string; font: string; size: number; w: number; color: string; o: number[]; x1: number }[] };
@@ -139,11 +211,21 @@ const Region = Node.create({
   },
 });
 
+/** 이미지: 글줄 안에 놓이며 너비(pt)와 띄움(왼쪽·오른쪽)을 가진다. */
 const Img = Image.extend({
   addAttributes() {
-    return { ...this.parent?.(), widthPt: { default: null, renderHTML: (a: Record<string, unknown>) => (a.widthPt ? { style: `width:${a.widthPt}pt` } : {}) } };
+    return {
+      ...this.parent?.(),
+      widthPt: { default: null, renderHTML: () => ({}) },
+      float: { default: null, renderHTML: () => ({}) },
+    };
   },
-});
+  renderHTML({ node, HTMLAttributes }) {
+    const a = node.attrs;
+    const style = [a.widthPt ? `width:${a.widthPt}pt` : "", a.float ? `float:${a.float};margin:2pt ${a.float === "left" ? "6pt 2pt 0" : "0 2pt 6pt"}` : ""].filter(Boolean).join(";");
+    return ["img", mergeAttributes(HTMLAttributes, style ? { style } : {})];
+  },
+}).configure({ inline: true });
 
 const cellAttrs = {
   background: {
@@ -174,6 +256,26 @@ const Row = TableRow.extend({
     return { ...this.parent?.(), h: { default: null, renderHTML: (a: Record<string, unknown>) => (a.h ? { style: `height:${a.h}pt` } : {}) } };
   },
 });
+function applyTableLook(dom: HTMLElement, node: PMNode) {
+  const a = node.attrs;
+  dom.style.setProperty("--lc", a.lineColor ?? "#231f20");
+  dom.style.setProperty("--lw", `${Math.max(0.3, a.lineW ?? 0.5)}pt`);
+  if (a.widthPct) dom.style.setProperty("--tw", `${a.widthPct}%`); else dom.style.removeProperty("--tw");
+  dom.style.float = a.float ?? "";
+  dom.classList.toggle("floated", !!a.float);
+}
+class LookTableView extends TableView {
+  constructor(node: PMNode, cellMinWidth: number) {
+    super(node, cellMinWidth);
+    applyTableLook(this.dom as HTMLElement, node);
+  }
+  update(node: PMNode) {
+    const ok = super.update(node);
+    if (ok) applyTableLook(this.dom as HTMLElement, node);
+    return ok;
+  }
+}
+
 /** 표: 선 색·굵기와 배치(왼쪽 띄움·너비)를 원본에서 가져온다. */
 const Tbl = Table.extend({
   addAttributes() {
@@ -191,10 +293,12 @@ const Tbl = Table.extend({
 });
 
 export const extensions = [
-  StarterKit.configure({ heading: { levels: [1, 2, 3] }, paragraph: false }),
-  Para, TextStyle, Color, FontSize, Img,
-  Tbl.configure({ resizable: false }), Row, Cell, Header,
-  Variable, ModuleBlock, Columns, Region,
+  StarterKit.configure({ heading: false, paragraph: false }),
+  Head.configure({ levels: [1, 2, 3] }), Para, TextStyle, Color, FontSize, Img,
+  // 기본 정렬은 용지 스타일(본문 양쪽, 제목 가운데)에 맡기고, 직접 고른 정렬만 문단에 기록한다
+  TextAlign.configure({ types: ["paragraph", "heading"], defaultAlignment: null as never }),
+  Tbl.configure({ resizable: true, View: LookTableView as never, cellMinWidth: 8, lastColumnResizable: true }), Row, Cell, Header,
+  Variable, ModuleBlock, Columns, Region, Box, Figure, Gallery,
 ];
 
 /** 모듈 문안(템플릿)을 편집기 인라인 노드로 만든다. 변수는 기본값으로 채운다. */

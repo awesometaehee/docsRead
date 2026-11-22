@@ -147,14 +147,30 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .region.floated + * { clear: none; }
 .region.footer { margin: 6pt calc(-1 * var(--pad, 14.2pt)) calc(-1 * var(--pad, 14.2pt)); clear: both; }
 .region.ProseMirror-selectednode { outline: 2px solid var(--accent); }
-/* 약관: 제목 아래 본문 전체를 감싸는 틀, 섹션 패널 */
-.paper.terms .ProseMirror > h1 ~ *:not(h2, .region, :has(> h2), h2 ~ *, :has(> h2) ~ *) { border-left: 0.5pt solid #939598; border-right: 0.5pt solid #939598; padding-left: 7pt; padding-right: 7pt; }
-.paper.terms .ProseMirror > h1 + * { padding-top: 5pt; }
-.paper.terms .ProseMirror > h1 ~ *:not(h2, .region, :has(> h2), h2 ~ *, :has(> h2) ~ *):is(:has(+ h2), :has(+ :has(> h2)), :has(+ .region), :last-child) { border-bottom: 0.5pt solid #939598; padding-bottom: 8pt; }
-.paper .modblock:has(> h2) { margin-top: 8pt; border: 0.5pt solid #939598; border-top: 0; border-radius: 12pt 12pt 0 0; padding-bottom: 4pt; }
-.paper .modblock:has(> h2) > h2 { margin: 0 -0.5pt; }
-.paper .modblock:has(> h2) > *:not(h2) { margin-left: 7pt; margin-right: 7pt; }
-.paper .modblock:has(> h2) > h2 + * { margin-top: 3pt; }
+/* 박스(틀·패널) */
+.paper .box { margin: 0; overflow: hidden; --bp: 7pt; padding-bottom: 4pt; }
+.paper .box + .box { margin-top: 8pt; }
+.paper .box.bleed { margin-left: calc(-1 * var(--pad, 14.2pt)); margin-right: calc(-1 * var(--pad, 14.2pt)); padding: 3pt var(--pad, 14.2pt); clear: both; }
+.paper .box > :not(h1, h2, .modblock, .box), .paper .box > .modblock > :not(h1, h2) { margin-left: var(--bp); margin-right: var(--bp); }
+.paper .box > h1, .paper .box > h2, .paper .box > .modblock > h2 { margin-top: 0; border-radius: 0; }
+.paper .box > h1 + *, .paper .box > h2 + *, .paper .box > .modblock > h2 + * { margin-top: 3pt; }
+.paper .box > :first-child:not(h1, h2, .modblock) { margin-top: 4pt; }
+.paper p.logo { white-space: nowrap; text-align: left; padding-top: 20pt; }
+/* 사진 묶음과 캡션 그림 */
+.paper .gallery { display: flex; flex-wrap: wrap; justify-content: space-around; align-items: flex-end; gap: 3pt 4pt; padding: 4pt 2pt; margin: 4pt 0; }
+.paper .gallery.floated { margin: 6pt 0 2pt 4pt; }
+.paper .gallery.floated + * { clear: none; }
+.paper .fig { margin: 0; max-width: 100%; }
+.paper .figbox { position: relative; width: 100%; overflow: hidden; }
+.paper .fig.plain figcaption { display: none; }
+.paper .figbox img { position: absolute; max-width: none; }
+.paper .fig figcaption { text-align: center; min-height: 1em; white-space: nowrap; }
+.paper .fig.ProseMirror-selectednode, .paper img.ProseMirror-selectednode { outline: 2px solid var(--accent); }
+.paper .tableWrapper { width: var(--tw, auto); overflow: visible; margin-top: 1pt; margin-bottom: 1pt; }
+.paper .tableWrapper.floated { margin: 2pt 8pt 2pt 0; }
+.paper .tableWrapper table { margin: 0; width: 100% !important; }
+.paper .column-resize-handle { position: absolute; right: -2px; top: 0; bottom: 0; width: 3px; background: var(--accent); pointer-events: none; z-index: 3; }
+.paper.resize-cursor { cursor: col-resize; }
 /* 상품설명서 */
 .paper.brochure h1 { font-size: 10pt; line-height: 13pt; border-radius: 9pt 9pt 0 0; }
 .paper.brochure h2 { font-size: 10pt; line-height: 12.5pt; border-radius: 9pt 9pt 0 0; margin-top: 6pt; }
@@ -207,3 +223,17 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
   .modblock:hover { box-shadow: none !important; background: none !important; }
   @page { size: A4; margin: 0; }
 }
+
+/* 편집 도구 모음 */
+.edbar.tools { gap: 5px 8px; padding: 4px 12px; font-size: 12px; }
+.edbar.tools select { font: inherit; font-size: 12px; border: 1px solid var(--line); border-radius: 7px; padding: 3px 4px; background: #fff; max-width: 190px; }
+.edbar.ctx { background: #f6f9ff; }
+.edbar.ctx > b { color: var(--accent); }
+.grp { display: inline-flex; align-items: center; gap: 4px; color: var(--mute); }
+.num { display: inline-flex; align-items: center; gap: 3px; color: var(--mute); white-space: nowrap; }
+.num input { font: inherit; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px; }
+.sw { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); border-radius: 7px; padding: 2px 4px; background: #fff; }
+.sw em { font-style: normal; color: var(--mute); margin-right: 3px; white-space: nowrap; }
+.sw button { width: 15px; height: 15px; border: 1px solid #b9bec6; border-radius: 3px; padding: 0; cursor: pointer; }
+.sw button.none { background: #fff; color: var(--mute); line-height: 11px; font-size: 12px; }
+.sw input[type="color"] { width: 18px; height: 18px; border: 0; padding: 0; background: none; cursor: pointer; }

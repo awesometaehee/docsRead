@@ -69,8 +69,11 @@ def _plain_paragraphs(runs: list[dict]) -> list[dict]:
     return [_paragraph(_text_nodes(line)) for line in lines if line] or [_paragraph([])]
 
 
-def table_node(content: dict, bbox=None, images: list[dict] | None = None, attrs: dict | None = None) -> dict:
-    total = sum(content.get("col_w", [])) or 1
+def table_node(content: dict, bbox=None, images: list[dict] | None = None, attrs: dict | None = None,
+               share: float = 1.0) -> dict:
+    """share: 표가 용지 글 영역에서 차지하는 너비 비율. 열 너비 합이 표 자리보다 크면 표가 넘치므로 조금 작게 잡는다
+    (고정 배치 표는 남는 폭을 열 비율대로 나눠 채운다)."""
+    total = (sum(content.get("col_w", [])) or 1) / (max(0.05, min(1.0, share)) * 0.9)
     xs, ys = [0.0], [0.0]
     for w in content.get("col_w", []):
         xs.append(xs[-1] + w)
@@ -91,7 +94,7 @@ def table_node(content: dict, bbox=None, images: list[dict] | None = None, attrs
                 pics = [{"type": "image", "attrs": {"src": f"/api/assets/{im['asset']}.png", "alt": "",
                                                     "widthPt": round(im["bbox"][2] - im["bbox"][0], 1)}} for im in inside]
                 if pics:
-                    body = pics + ([] if not c["text"] else body)
+                    body = [{"type": "paragraph", "content": pics}] + ([] if not c["text"] else body)
             cells.append({"type": "tableCell",
                           "attrs": {"colspan": c["cs"], "rowspan": c["rs"], "background": c.get("fill"),
                                     "align": c.get("align", "left"), "colwidth": widths,
@@ -206,6 +209,77 @@ def module_paragraphs(paras: list[list[dict]], variant: ModuleVariant, values: l
 PAD = 14.2     # 용지 가장자리 ~ 틀(표·패널)까지 여백(pt). 원본 공통값
 
 
+def box(content: list[dict], **attrs) -> dict:
+    """박스(틀·패널): 테두리·둥근 위 모서리·배경을 가진 묶음. 편집기에서 직접 만들고 꾸밀 수 있는 부품이다."""
+    return {"type": "box", "attrs": attrs, "content": content or [_paragraph([])]}
+
+
+def _is_section(node: dict) -> bool:
+    if node["type"] == "heading":
+        return node["attrs"]["level"] == 2
+    first = (node.get("content") or [{}])[0]
+    return node["type"] == "moduleBlock" and first.get("type") == "heading" and first["attrs"]["level"] == 2
+
+
+def gallery_node(page, figs: list[Block], rect, body_pt: float, **attrs) -> dict:
+    """사진 묶음 → 편집 가능한 그림(figure)들. 겹치거나 맞닿은 사진은 한 장면(타일)으로 묶고 캡션을 붙인다."""
+    n = len(figs)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = figs[i].bbox, figs[j].bbox
+            if a[0] - 2 <= b[2] and b[0] - 2 <= a[2] and a[1] - 2 <= b[3] and b[1] - 2 <= a[3]:
+                parent[find(i)] = find(j)
+    groups: dict[int, list[Block]] = defaultdict(list)
+    for i, f in enumerate(figs):
+        groups[find(i)].append(f)
+    tiles = []
+    for members in groups.values():
+        x0, y0 = min(f.bbox[0] for f in members), min(f.bbox[1] for f in members)
+        x1, y1 = max(f.bbox[2] for f in members), max(f.bbox[3] for f in members)
+        tiles.append({"box": (x0, y0, x1, y1), "members": members, "caption": []})
+    # 캡션: 영역 안의 글줄을 바로 위 타일에 붙인다
+    for it in page.items:
+        if it.kind != "text":
+            continue
+        cx, cy = (it.x0 + it.x1) / 2, (it.y0 + it.y1) / 2
+        if not (rect[0] <= cx <= rect[2] and rect[1] <= cy <= rect[3]):
+            continue
+        above = [t for t in tiles if cy >= t["box"][3] - 1 and it.y0 - t["box"][3] < 18
+                 and min(t["box"][2], it.x1) - max(t["box"][0], it.x0) > -6]
+        if not above:
+            continue
+        tile = max(above, key=lambda t: min(t["box"][2], it.x1) - max(t["box"][0], it.x0))
+        for sp in it.data["spans"]:
+            run = {"t": sp["t"]}
+            if abs(sp["size"] - body_pt) > 0.3:
+                run["s"] = sp["size"]
+            if sp["color"] not in ("#231f20", "#000000", "#58595b"):
+                run["c"] = sp["color"]
+            if sp["w"] >= 600:
+                run["b"] = 1
+            tile["caption"].append(run)
+    tiles.sort(key=lambda t: (round(((t["box"][1] + t["box"][3]) / 2) / 30), t["box"][0]))
+    figures = []
+    for t in tiles:
+        x0, y0, x1, y1 = t["box"]
+        images = [{"src": f"/api/assets/{f.content['asset']}.png", "x": round(f.bbox[0] - x0, 1), "y": round(f.bbox[1] - y0, 1),
+                   "w": round(f.bbox[2] - f.bbox[0], 1), "h": round(f.bbox[3] - f.bbox[1], 1)} for f in t["members"]]
+        node = {"type": "figure", "attrs": {"w": round(x1 - x0, 1), "h": round(y1 - y0, 1), "images": images}}
+        cap = _text_nodes(t["caption"])
+        if cap:
+            node["content"] = cap
+        figures.append(node)
+    return {"type": "gallery", "attrs": attrs, "content": figures}
+
+
 def _item(it) -> dict:
     return {"k": it.kind, "b": [it.x0, it.y0, it.x1, it.y1], **it.data}
 
@@ -297,7 +371,8 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
                 gallery[pno].append(f)
 
     def tnode(c: Block, attrs=None) -> dict:
-        return table_node(c.content, c.bbox, in_table.get(c.seq), attrs)
+        share = (c.bbox[2] - c.bbox[0]) / content_w if c.bbox else 1.0
+        return table_node(c.content, c.bbox, in_table.get(c.seq), attrs, share)
 
     def wrap(seq: int, head: list[dict], children: list[Block], strip_heading=False) -> list[dict]:
         """블록 seq 가 모듈이면 moduleBlock 으로 감싼다. children 은 문단·표 블록."""
@@ -371,18 +446,50 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         elif b.kind == "table":
             emit(b, [tnode(b)])
         elif b.kind == "footer" and b.page_no in footer_top:
+            # 꼬리말: 로고 + 회사 정보 줄, 전화번호 띠(배경색 박스). 모두 편집 가능한 글·그림으로 만든다
             page = pages[b.page_no]
             top = footer_top.pop(b.page_no)     # 쪽마다 한 번만
-            emit(b, [region_node(page, (0, top, page.width, page.height), "footer")], 1e8)
+            lines = _plain_paragraphs(b.content.get("runs", []))
+
+            def big(par):
+                return any((m.get("attrs") or {}).get("fontSize", 0) >= 11 for n in par.get("content", [])
+                           for m in n.get("marks", []) if m["type"] == "textStyle")
+
+            info = [l for l in lines if not big(l)]
+            phones = [l for l in lines if big(l)]
+            logos = sorted((it for it in page.items if it.kind == "image" and it.y1 > top + 4), key=lambda it: it.y0)
+            band = max((it for it in page.items if it.kind == "path" and it.data.get("fill") and it.y1 > top + 20
+                        and it.data["fill"] != "#ffffff" and it.x1 - it.x0 > page.width * 0.5),
+                       key=lambda it: (it.x1 - it.x0) * (it.y1 - it.y0), default=None)
+            nodes = []
+            if logos and info:
+                # 로고는 여러 조각 그림이 세로로 이어진 것이라 한 장면(그림 부품)으로 묶고, 전화번호 띠 위까지만 보이게 한다
+                lx0, ly0 = min(it.x0 for it in logos), min(it.y0 for it in logos)
+                lx1, ly1 = max(it.x1 for it in logos), max(it.y1 for it in logos)
+                if band is not None:
+                    ly1 = min(ly1, band.y0)
+                for l in info:
+                    l.setdefault("attrs", {})["role"] = "logo"
+                info = [{"type": "figure", "attrs": {
+                    "w": round(lx1 - lx0, 1), "h": round(ly1 - ly0, 1), "float": "left", "plain": True,
+                    "images": [{"src": f"/api/assets/{it.data['asset']}.png", "x": round(it.x0 - lx0, 1), "y": round(it.y0 - ly0, 1),
+                                "w": round(it.x1 - it.x0, 1), "h": round(it.y1 - it.y0, 1)} for it in logos]}}] + info
+            if info:
+                nodes.append(box(info, border=False, bleed=True, pad=0))
+            if phones:
+                for l in phones:
+                    l.setdefault("attrs", {})["textAlign"] = "center"
+                nodes.append(box(phones, border=False, bleed=True, bg=band.data["fill"] if band else "#dadbdc", pad=0))
+            emit(b, nodes, 1e8)
 
     # 사진 묶음: 원본 위치의 세로 순서에 맞춰 끼워 넣는다. 옆에 글이 있으면 그쪽을 비워 띄운다.
     for pno, fl in gallery.items():
         page = pages[pno]
         if len(fl) < 3:
             for f in fl:
-                out.append((pno, f.bbox[1], {"type": "image", "attrs": {
+                out.append((pno, f.bbox[1], _paragraph([{"type": "image", "attrs": {
                     "src": f"/api/assets/{f.content['asset']}.png", "alt": f.content.get("caption") or "",
-                    "widthPt": round(f.bbox[2] - f.bbox[0], 1)}}))
+                    "widthPt": round(f.bbox[2] - f.bbox[0], 1)}}])))
             continue
         ux0, uy0 = min(f.bbox[0] for f in fl), min(f.bbox[1] for f in fl)
         ux1, uy1 = max(f.bbox[2] for f in fl), max(f.bbox[3] for f in fl)
@@ -390,23 +497,54 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         panels = [it for it in page.items if it.kind == "path" and it.data.get("fill")
                   and it.x0 <= ux0 + 2 and it.y0 <= uy0 + 2 and it.x1 >= min(ux1, page.width - PAD) - 2 and it.y1 >= uy1 - 2
                   and (it.x1 - it.x0) * (it.y1 - it.y0) < page.width * page.height * 0.4]
-        if panels:      # 사진들을 감싼 배경 패널이 있으면 그 범위를 쓴다
+        attrs = {}
+        if panels:      # 사진들을 감싼 배경 패널이 있으면 그 범위와 배경색을 쓴다
             pn = min(panels, key=lambda it: (it.x1 - it.x0) * (it.y1 - it.y0))
             rect = (max(pn.x0, PAD), pn.y0, min(pn.x1, page.width - PAD), pn.y1)
+            if pn.data["fill"] != "#ffffff":
+                attrs["bg"] = pn.data["fill"]
         width = rect[2] - rect[0]
-        attrs = {}
         if width < content_w * 0.85:
-            attrs = {"float": "right" if (rect[0] + rect[2]) / 2 > page.width / 2 else "left",
-                     "widthPct": round(width / content_w * 100, 1)}
-        out.append((pno, rect[1] - 14, region_node(page, rect, "gallery", **attrs)))
+            attrs.update({"float": "right" if (rect[0] + rect[2]) / 2 > page.width / 2 else "left",
+                          "widthPct": round(width / content_w * 100, 1)})
+        out.append((pno, rect[1] - 14, gallery_node(page, fl, rect, style["body_pt"], **attrs)))
 
-    order = sorted(range(len(out)), key=lambda i: (out[i][0], 0 if out[i][2]["type"] != "region" else 1, i))
     # 본문 블록은 읽기 순서 그대로 두고, 사진 묶음만 세로 위치에 맞는 자리로 옮긴다
-    body_nodes = [o for o in out if not (o[2]["type"] == "region" and o[2]["attrs"]["kind"] == "gallery")]
-    for g in (o for o in out if o[2]["type"] == "region" and o[2]["attrs"]["kind"] == "gallery"):
+    body_nodes = [o for o in out if o[2]["type"] != "gallery"]
+    for g in (o for o in out if o[2]["type"] == "gallery"):
         at = next((i for i, o in enumerate(body_nodes) if o[0] == g[0] and o[1] >= g[1] and o[1] < 1e8), None)
         if at is None:
             at = next((i for i, o in enumerate(body_nodes) if o[0] > g[0] or (o[0] == g[0] and o[1] >= 1e8)), len(body_nodes))
         body_nodes.insert(at, g)
-    content = [n for _, _, n in body_nodes]
+    if doc.doc_type == "terms":
+        # 약관: 쪽마다 본문을 감싸는 틀, 섹션마다 패널 → 박스 부품으로 묶는다
+        grouped: list[dict] = []
+        cur: list[dict] = []
+        cur_key = None
+
+        def close():
+            nonlocal cur
+            if cur:
+                first = cur[0]["type"] == "heading" or _is_section(cur[0])
+                grouped.append(box(cur, border=True, round=first, pad=7))
+                cur = []
+
+        sec = 0
+        for pno, y, node in body_nodes:
+            if node["type"] == "box":           # 꼬리말 등 이미 박스인 것은 그대로
+                close()
+                grouped.append(node)
+                cur_key = None
+                continue
+            if _is_section(node):
+                sec += 1
+            key = (pno, sec)
+            if key != cur_key:
+                close()
+                cur_key = key
+            cur.append(node)
+        close()
+        content = grouped
+    else:
+        content = [n for _, _, n in body_nodes]
     return {"type": "doc", "content": content or [_paragraph([])]}, stats, style

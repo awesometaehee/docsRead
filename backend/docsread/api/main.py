@@ -7,7 +7,7 @@ from pathlib import Path
 import pymupdf
 from datetime import datetime
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select
@@ -177,6 +177,33 @@ def doc_modules(doc_id: int):
                 for seq, mid, title, n, ordinal, nv in rows}
 
 
+@app.post("/api/assets")
+async def upload_asset(request: Request):
+    """편집기에서 넣는 이미지. 본문을 PNG 로 바꿔 내용 해시 이름으로 data/assets 에 저장한다."""
+    import hashlib
+
+    raw = await request.body()
+    if not raw or len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(413, "이미지는 15MB 이하만 올릴 수 있습니다")
+    try:
+        pix = pymupdf.Pixmap(raw)
+        if pix.colorspace is not None and pix.colorspace.n != 3:
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+        png = pix.tobytes("png")
+    except Exception:
+        raise HTTPException(415, "이미지 파일(PNG·JPG 등)만 올릴 수 있습니다")
+    sha = hashlib.sha256(png).hexdigest()
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    path = ASSET_DIR / f"{sha}.png"
+    if not path.exists():
+        path.write_bytes(png)
+    with SessionLocal() as s:
+        if s.get(Asset, sha) is None:
+            s.add(Asset(sha256=sha, width=pix.width, height=pix.height, bytes=len(png), use_count=0))
+            s.commit()
+    return {"src": f"/api/assets/{sha}.png", "width": pix.width, "height": pix.height}
+
+
 def _draft_row(d: Draft) -> dict:
     return {"id": d.id, "title": d.title, "doc_type": d.doc_type, "base_document_id": d.base_document_id,
             "updated_at": d.updated_at.isoformat(timespec="seconds")}
@@ -194,8 +221,14 @@ def create_draft(payload: dict = Body(default={})):
     with SessionLocal() as s:
         doc_id = payload.get("document_id")
         if doc_id is None:
-            d = Draft(title=payload.get("title") or "새 문서", doc_type=payload.get("doc_type") or "terms",
-                      content={"type": "doc", "content": [{"type": "paragraph"}]}, style={})
+            dtype = "brochure" if payload.get("doc_type") == "brochure" else "terms"
+            d = Draft(title=payload.get("title") or "새 문서", doc_type=dtype,
+                      content={"type": "doc", "content": [
+                          {"type": "box", "attrs": {"border": True, "round": True, "pad": 7}, "content": [
+                              {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "제목"}]},
+                              {"type": "paragraph"}]}]},
+                      style={"body_pt": 8.4, "line_height": 1.14, "page_w": 595.3, "page_h": 841.9, "pad": 14.2,
+                             "doc_type": dtype})
             stats = {}
         else:
             doc = _get_doc(s, int(doc_id))
@@ -225,13 +258,16 @@ def save_draft(draft_id: int, payload: dict = Body(...)):
             raise HTTPException(404, "편집 문서를 찾을 수 없습니다")
         if "title" in payload:
             d.title = str(payload["title"])[:200] or d.title
+        if isinstance(payload.get("style"), dict):
+            d.style = {**(d.style or {}), **{k: v for k, v in payload["style"].items()
+                                             if k in ("body_pt", "line_height") and isinstance(v, (int, float))}}
         if "content" in payload:
             if not isinstance(payload["content"], dict) or payload["content"].get("type") != "doc":
                 raise HTTPException(422, "content 는 편집기 문서 JSON 이어야 합니다")
             d.content = payload["content"]
         d.updated_at = datetime.utcnow()
         s.commit()
-        return _draft_row(d)
+        return {**_draft_row(d), "style": d.style or {}}
 
 
 @app.delete("/api/drafts/{draft_id}")
