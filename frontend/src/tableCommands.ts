@@ -4,6 +4,7 @@
  */
 import { Extension } from "@tiptap/core";
 import type { Editor } from "@tiptap/core";
+import { multiCellPlugin } from "./multiCell";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
@@ -314,5 +315,5 @@ export function insertTable(editor: Editor, rows: number, cols: number, headerSt
 export const TableTools = Extension.create({
   name: "tableTools",
   priority: 1000,   // 열 끌기 플러그인보다 먼저 mousedown 을 받아야 끌기 전 너비를 고정할 수 있다
-  addProseMirrorPlugins() { return [keeperPlugin()]; },
+  addProseMirrorPlugins() { return [keeperPlugin(), multiCellPlugin()]; },
 });

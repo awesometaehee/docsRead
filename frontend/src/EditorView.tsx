@@ -4,13 +4,14 @@ import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get } from "./api";
 import { extensions, insertColumnBreak, partsToInline, setColumnCount } from "./editorExtensions";
-import { addLineNear, autoHangAll, clearTextStyleAttr, canJoinPrevBox, canMoveIntoPrevBox, canPin, hangOf, insertPageBreak, isPinned, joinPrevBox,
+import { addLineNear, autoHangAll, clearTextStyleAttr, fitImage, setImageAttrs, canJoinPrevBox, canMoveIntoPrevBox, canPin, hangOf, insertPageBreak, isPinned, joinPrevBox,
   layoutPages, liftOutOfBox, moveIntoPrevBox, setHang, splitBox, togglePin, toggleHang, unwrapBox } from "./blockCommands";
 import type { PageInfo } from "./blockCommands";
 import { applyHeaderStyle, columnPct, columnRatios, copyTableFormat, setColumnRatios, equalizeColumns, insertTable, pasteTableFormat, rowHeightOf, setColumnPct,
   setRowHeight } from "./tableCommands";
 import type { TableFormat } from "./tableCommands";
 import { tip } from "./tips";
+import { installPrintLines } from "./printLines";
 import type { DocRow, ModuleDetail, ModuleRow, Variant } from "./types";
 
 interface DraftRow { id: number; title: string; doc_type: string; base_document_id: number | null; updated_at: string }
@@ -207,6 +208,13 @@ const MOVES_CURSOR = new Set(["쪽 나눔", "여기서 나누기", "앞 박스�
 const SIZES = [4.8, 5.5, 6, 6.5, 7, 7.6, 8, 8.4, 9, 10, 11, 12, 14, 16, 18, 22];
 
 /** 색 고르기: 자주 쓰는 색 + 직접 고르기 + 지우기. */
+/** 도구 묶음: 작은 이름표 + 도구들. 묶음 사이는 세로 구분선으로 나눈다. */
+function G({ cap, children }: { cap: string; children: React.ReactNode }) {
+  return <div className="tg" role="group" aria-label={cap}><span className="tg-cap">{cap}</span>{children}</div>;
+}
+const DANGER = new Set(["표 삭제", "박스 풀기", "그림 삭제"]);
+const PRIMARY = new Set(["표 넣기", "인쇄 · PDF"]);
+
 function Swatches({ label, colors, onPick }: { label: string; colors: string[]; onPick: (c: string | null) => void }) {
   return (
     <span className="sw">
@@ -290,7 +298,7 @@ function DraftEditor({ draft, onSaved }: { draft: Draft; onSaved: (row: DraftRow
   paperRef.current = paper;
   const paperVars = {
     "--body": `${paper.body_pt ?? 8.4}pt`, "--lh": String(paper.line_height ?? 1.2), "--pw": `${paper.page_w ?? 595.3}pt`,
-    "--ph": `${paper.page_h ?? 841.9}pt`, "--pad": `${paper.pad ?? 14.2}pt`, zoom,
+    "--ph": `${paper.page_h ?? 841.9}pt`, "--pad": `${paper.pad ?? 14.2}pt`, "--pages": String(Math.max(1, pageInfo.pages)), zoom,
   } as React.CSSProperties;
 
   const save = useCallback(async (ed: Editor, t: string) => {
@@ -315,6 +323,8 @@ function DraftEditor({ draft, onSaved }: { draft: Draft; onSaved: (row: DraftRow
     onSelectionUpdate: () => setTick((n) => n + 1),
   });
   useEffect(() => () => clearTimeout(timer.current), []);
+  // 인쇄할 때 표 괘선을 지정 굵기 그대로 다시 긋는다(크롬은 얇은 CSS 테두리를 0.75pt 로 올려 찍음)
+  useEffect(() => installPrintLines(() => scrollRef.current?.querySelector<HTMLElement>(".paper") ?? null), []);
   useEffect(() => {   // 알림은 잠시 보여 주고 저절로 닫는다
     if (!note) return;
     const t = setTimeout(() => setNote(""), 6000);
@@ -400,7 +410,7 @@ function DraftEditor({ draft, onSaved }: { draft: Draft; onSaved: (row: DraftRow
     requestAnimationFrame(() => requestAnimationFrame(() => { sc.scrollTop = top; }));
   };
   const btn = (label: string, on: boolean, run: () => void, hint?: string) => (
-    <button className={on ? "on" : ""} {...tip(label, hint)}
+    <button className={[on ? "on" : "", DANGER.has(label) ? "danger" : "", PRIMARY.has(label) ? "primary" : ""].filter(Boolean).join(" ") || undefined} {...tip(label, hint)}
       onMouseDown={(e) => { e.preventDefault(); if (MOVES_CURSOR.has(label)) run(); else keepScroll(run); }}>{label}</button>
   );
   const fig = A("figure") as { w?: number; h?: number; images?: { src: string; x: number; y: number; w: number; h: number }[] };
@@ -414,182 +424,210 @@ function DraftEditor({ draft, onSaved }: { draft: Draft; onSaved: (row: DraftRow
           {status === "error" && <button onClick={() => save(editor, title)}>다시 저장</button>}
           {/* 문서 전체 설정과 보기 도구: 선택에 따라 바뀌지 않으므로 제목 줄에 둔다 */}
           <span className="edview tools">
-            <Num label="본문 pt" value={paper.body_pt ?? 8.4} step={0.1} onSet={(v) => { if (v && v >= 3 && v <= 30) { setPaper({ ...paper, body_pt: v }); later(); } }} />
-            <Num label="줄 간격" value={paper.line_height ?? 1.2} step={0.05} onSet={(v) => { if (v && v >= 0.9 && v <= 3) { setPaper({ ...paper, line_height: v }); later(); } }} />
-            <span className={`pages${pageInfo.overflow.length ? " over" : ""}`}
-              {...tip("쪽 수", pageInfo.overflow.length ? `${pageInfo.overflow.join(", ")}쪽 내용이 한 쪽 높이를 넘습니다. 글을 줄이거나 쪽 나눔 위치를 옮기세요.` : "인쇄될 쪽 수입니다. 편집 화면의 빨간 선이 쪽 경계입니다. 쪽 나눔 앞 내용이 한 쪽을 넘으면 빨간색으로 알려 줍니다.", pageInfo.overflow.length ? "쪽 넘침" : "쪽 수")}>
-              {pageInfo.pages}쪽{pageInfo.overflow.length ? ` · ${pageInfo.overflow.join(",")}쪽 넘침` : ""}
-            </span>
-            <div className="seg">{btn("모듈·변수 표시", marks, () => setMarks(!marks))}</div>
-            <select className="zoom" value={zoom} onChange={(e) => setZoom(Number(e.target.value))} aria-label="확대" {...tip("확대")}>
-              {[1, 1.25, 1.5, 2, 2.5].map((z) => <option key={z} value={z}>{z * 100}%</option>)}
-            </select>
-            <div className="seg">{btn("인쇄 · PDF", false, () => window.print())}</div>
+            <G cap="문서">
+              <Num label="본문 pt" value={paper.body_pt ?? 8.4} step={0.1} onSet={(v) => { if (v && v >= 3 && v <= 30) { setPaper({ ...paper, body_pt: v }); later(); } }} />
+              <Num label="줄 간격" value={paper.line_height ?? 1.2} step={0.05} onSet={(v) => { if (v && v >= 0.9 && v <= 3) { setPaper({ ...paper, line_height: v }); later(); } }} />
+              <span className={`pages${pageInfo.overflow.length ? " over" : ""}`}
+                {...tip("쪽 수", pageInfo.overflow.length ? `${pageInfo.overflow.join(", ")}쪽 내용이 한 쪽 높이를 넘습니다. 글을 줄이거나 쪽 나눔 위치를 옮기세요.` : "인쇄될 쪽 수입니다. 편집 화면의 빨간 선이 쪽 경계입니다. 쪽 나눔 앞 내용이 한 쪽을 넘으면 빨간색으로 알려 줍니다.", pageInfo.overflow.length ? "쪽 넘침" : "쪽 수")}>
+                {pageInfo.pages}쪽{pageInfo.overflow.length ? ` · ${pageInfo.overflow.join(",")}쪽 넘침` : ""}
+              </span>
+            </G>
+            <G cap="보기">
+              {btn("모듈·변수 표시", marks, () => setMarks(!marks))}
+              <select className="zoom" value={zoom} onChange={(e) => setZoom(Number(e.target.value))} aria-label="확대" {...tip("확대")}>
+                {[1, 1.25, 1.5, 2, 2.5].map((z) => <option key={z} value={z}>{z * 100}%</option>)}
+              </select>
+            </G>
+            {btn("인쇄 · PDF", false, () => window.print())}
           </span>
         </div>
-        {/* 1줄: 글자 */}
+        {/* 1줄: 글자·문단 */}
         <div className="edbar tools">
-          <div className="seg">
+          <G cap="편집">
             {btn("↶", false, () => c().undo().run())}
             {btn("↷", false, () => c().redo().run())}
-          </div>
-          <select value={blockType} onChange={(e) => setBlock(e.target.value)} aria-label="문단 종류" {...tip("문단 종류")}>
-            <option value="p">본문</option><option value="h1">제목 띠</option><option value="h2">섹션 띠</option><option value="h3">조 제목</option>
-          </select>
-          <select value={fontSize ?? ""} onChange={(e) => setSize(e.target.value ? Number(e.target.value) : null)} aria-label="글자 크기" {...tip("글자 크기")}>
-            <option value="">크기: 본문</option>
-            {[...new Set([...SIZES, ...(fontSize ? [fontSize] : [])])].sort((a, b) => a - b).map((n) => <option key={n} value={n}>{n}pt</option>)}
-          </select>
-          <div className="seg">{btn("굵게", editor.isActive("bold"), () => c().toggleBold().run())}</div>
-          <Swatches label="글자색" colors={COLORS} onPick={setColor} />
-          <div className="seg">
-            {btn("왼쪽", false, () => align("left"))}{btn("가운데", false, () => align("center"))}
-            {btn("오른쪽", false, () => align("right"))}{btn("양쪽", false, () => align("justify"))}
-          </div>
-          <div className="seg">
-            {btn("내어쓰기", hang !== null, () => toggleHang(editor), "둘째 줄부터 앞 번호·기호(①, 1., ※ 등) 폭만큼 들여 씁니다")}
-            {btn("전체 자동", false, () => setNote(`번호·기호로 시작하는 문단 ${autoHangAll(editor)}개에 내어쓰기를 맞췄습니다.`), "문서 전체에서 ①·1.·※ 등으로 시작하는 문단에 기호 폭만큼 내어쓰기를 맞춥니다")}
-          </div>
-          {hang !== null && <Num label="폭 em" value={hang} step={0.05} onSet={(v) => setHang(editor, v)} width={50} />}
-          <Swatches label={fillTarget ? `배경: ${fillTarget}` : "배경"} colors={FILLS} onPick={setFill} />
+          </G>
+          <G cap="글자">
+            <select value={blockType} onChange={(e) => setBlock(e.target.value)} aria-label="문단 종류" {...tip("문단 종류")}>
+              <option value="p">본문</option><option value="h1">제목 띠</option><option value="h2">섹션 띠</option><option value="h3">조 제목</option>
+            </select>
+            <select value={fontSize ?? ""} onChange={(e) => setSize(e.target.value ? Number(e.target.value) : null)} aria-label="글자 크기" {...tip("글자 크기")}>
+              <option value="">크기: 본문</option>
+              {[...new Set([...SIZES, ...(fontSize ? [fontSize] : [])])].sort((a, b) => a - b).map((n) => <option key={n} value={n}>{n}pt</option>)}
+            </select>
+            {btn("굵게", editor.isActive("bold"), () => c().toggleBold().run())}
+            <Swatches label="글자색" colors={COLORS} onPick={setColor} />
+          </G>
+          <G cap="문단">
+            <div className="seg">
+              {btn("왼쪽", false, () => align("left"))}{btn("가운데", false, () => align("center"))}
+              {btn("오른쪽", false, () => align("right"))}{btn("양쪽", false, () => align("justify"))}
+            </div>
+            <div className="seg">
+              {btn("내어쓰기", hang !== null, () => toggleHang(editor), "둘째 줄부터 앞 번호·기호(①, 1., ※ 등) 폭만큼 들여 씁니다")}
+              {btn("전체 자동", false, () => setNote(`번호·기호로 시작하는 문단 ${autoHangAll(editor)}개에 내어쓰기를 맞췄습니다.`), "문서 전체에서 ①·1.·※ 등으로 시작하는 문단에 기호 폭만큼 내어쓰기를 맞춥니다")}
+            </div>
+            {hang !== null && <Num label="폭 em" value={hang} step={0.05} onSet={(v) => setHang(editor, v)} width={50} />}
+          </G>
+          <G cap="채우기">
+            <Swatches label={fillTarget ? `배경: ${fillTarget}` : "배경"} colors={FILLS} onPick={setFill} />
+          </G>
         </div>
         {/* 2줄: 넣기·배치 */}
         <div className="edbar tools">
-          <span className="grp">
+          <G cap="새 표">
             <Num label="표" value={grid.rows} onSet={(v) => setGrid({ ...grid, rows: Math.max(1, v ?? 1) })} width={36} />
             <Num label="×" value={grid.cols} onSet={(v) => setGrid({ ...grid, cols: Math.max(1, v ?? 1) })} width={36} />
-            <div className="seg">
-              {btn("표 넣기", false, () => insertTable(editor, grid.rows, grid.cols, headStyle))}
-              {btn("머리행 서식", headStyle, () => { const v = !headStyle; setHeadStyle(v); try { localStorage.setItem("docsread.headStyle", v ? "1" : "0"); } catch { /* 저장 못 해도 이번 화면에서는 적용 */ } },
-                "켜면 새 표의 첫 행을 회색으로, 모든 칸을 가운데 정렬로 넣습니다")}
-            </div>
-          </span>
-          <div className="seg">
+            {btn("머리행 서식", headStyle, () => { const v = !headStyle; setHeadStyle(v); try { localStorage.setItem("docsread.headStyle", v ? "1" : "0"); } catch { /* 저장 못 해도 이번 화면에서는 적용 */ } },
+              "켜면 새 표의 첫 행을 회색으로, 모든 칸을 가운데 정렬로 넣습니다")}
+            {btn("표 넣기", false, () => insertTable(editor, grid.rows, grid.cols, headStyle))}
+          </G>
+          <G cap="넣기">
             {btn("박스로 감싸기", false, () => c().wrapIn("box", { border: true, round: false, pad: 7 }).run(), "선택한 문단들을 테두리 상자로 묶습니다")}
             {canMoveIntoPrevBox(editor.state) && btn("위 박스에 넣기", false, () => moveIntoPrevBox(editor), "선택한 줄을 바로 위 박스의 끝으로 옮깁니다")}
-          </div>
-          <div className="seg">
-            {btn("쪽 나눔", false, () => insertPageBreak(editor), "여기서 다음 쪽으로 넘깁니다. 박스 안이면 박스도 쪽마다 나뉩니다")}
-            {canPin(editor.state) && btn("쪽 아래 고정", isPinned(editor.state), () => togglePin(editor), "이 블록(이어진 고정 블록들과 함께)을 쪽 맨 아래에 붙입니다. 꼬리말·연락처 띠에 씁니다")}
-          </div>
-          <div className="seg">
-            {btn("1단", !inCols, () => setColumns(1))}
-            {btn("2단", inCols && A("columns").count === 2, () => setColumns(2))}
-            {btn("3단", inCols && A("columns").count === 3, () => setColumns(3))}
-            {inCols && btn("단 넘기기", false, () => insertColumnBreak(editor), "커서 뒤의 내용을 다음 단 맨 위로 보냅니다")}
-          </div>
-          <div className="seg">
             {btn("이미지", false, () => { asFigure.current = false; fileRef.current?.click(); }, "글줄 안에 이미지를 넣습니다")}
             {btn("캡션 그림", false, () => { asFigure.current = true; fileRef.current?.click(); }, "아래에 설명 글이 붙는 그림을 넣습니다")}
-          </div>
-          <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) upload(f); }} />
-          <div className="seg">
+            <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) upload(f); }} />
+          </G>
+          <G cap="쪽·단">
+            {btn("쪽 나눔", false, () => insertPageBreak(editor), "여기서 다음 쪽으로 넘깁니다. 박스 안이면 박스도 쪽마다 나뉩니다")}
+            {canPin(editor.state) && btn("쪽 아래 고정", isPinned(editor.state), () => togglePin(editor), "이 블록(이어진 고정 블록들과 함께)을 쪽 맨 아래에 붙입니다. 꼬리말·연락처 띠에 씁니다")}
+            <div className="seg">
+              {btn("1단", !inCols, () => setColumns(1))}
+              {btn("2단", inCols && A("columns").count === 2, () => setColumns(2))}
+              {btn("3단", inCols && A("columns").count === 3, () => setColumns(3))}
+            </div>
+            {inCols && btn("단 넘기기", false, () => insertColumnBreak(editor), "커서 뒤의 내용을 다음 단 맨 위로 보냅니다")}
+          </G>
+          <G cap="문서">
             {btn("변수로 만들기", false, makeVariable, hasText ? "선택한 글자를 변수로 바꿉니다" : "먼저 글자를 선택하세요")}
             {btn("조 번호 다시 매기기", false, () => setNote(`조 제목 ${renumberArticles(editor)}개의 번호를 다시 매겼습니다. 본문 속 '제N조' 참조는 직접 확인하세요.`))}
-          </div>
+          </G>
         </div>
-        {/* 3줄: 지금 선택한 대상의 디자인 */}
-        {/* 3줄은 늘 같은 높이로 둔다(선택에 따라 줄이 생기고 없어지면 편집 화면이 위아래로 밀린다) */}
-        <div className="edbar tools ctx">
-          {!(inTable || inBox || inGallery || inFigure || isImage) && <span className="ctxhint">표·박스·그림·이미지 안에 커서를 두면 여기에 그 서식 도구가 나옵니다.</span>}
-        {(inTable || inBox || inGallery || inFigure || isImage) && (
-          <>
-            {inTable && (
-              <>
-                <b>표</b>
+        {/* 3줄: 지금 선택한 대상의 디자인. 늘 같은 높이로 둔다(선택에 따라 줄이 생기고 없어지면 편집 화면이 위아래로 밀린다) */}
+        <div className={`edbar tools ctx${inTable || inBox || inGallery || inFigure || isImage ? " active" : ""}`}>
+          {!(inTable || inBox || inGallery || inFigure || isImage) && <span className="ctxhint">표 · 박스 · 그림 · 이미지 안에 커서를 두면 여기에 그 대상의 서식 도구가 나옵니다.</span>}
+          {inTable && !isImage && (
+            <>
+              <span className="ctx-tag" {...tip("표", "커서가 있는 표의 도구입니다. 칸을 끌면 직사각형으로, Ctrl+클릭하면 떨어진 칸을 하나씩 더하거나 빼며 고를 수 있습니다. 고른 칸 모두에 배경·괘선·정렬·글자 서식·행 높이가 적용됩니다.", "표")}>표</span>
+              <G cap="구조">
                 <div className="seg">
                   {btn("행 추가", false, () => c().addRowAfter().run())}{btn("행 삭제", false, () => c().deleteRow().run())}
+                </div>
+                <div className="seg">
                   {btn("열 추가", false, () => c().addColumnAfter().run())}{btn("열 삭제", false, () => c().deleteColumn().run())}
                 </div>
                 <div className="seg">
-                  {btn("칸 합치기", false, () => c().mergeCells().run(), "여러 칸을 끌어서 선택한 뒤 누르세요")}
+                  {btn("칸 합치기", false, () => c().mergeCells().run(), "여러 칸을 끌어서(직사각형으로) 고른 뒤 누르세요. Ctrl+클릭으로 따로 고른 칸은 합칠 수 없습니다.")}
                   {btn("칸 나누기", false, () => c().splitCell().run())}
                 </div>
-                <span className="grp">테두리
-                  <div className="seg">
-                    {btn("전체", false, () => c().setCellAttribute("ln", [1, 1, 1, 1]).run())}
-                    {btn("가로만", false, () => c().setCellAttribute("ln", [1, 0, 1, 0]).run())}
-                    {btn("세로만", false, () => c().setCellAttribute("ln", [0, 1, 0, 1]).run())}
-                    {btn("없음", false, () => c().setCellAttribute("ln", [0, 0, 0, 0]).run())}
-                  </div>
-                </span>
+              </G>
+              <G cap="괘선">
+                <div className="seg">
+                  {btn("전체", false, () => c().setCellAttribute("ln", [1, 1, 1, 1]).run())}
+                  {btn("가로만", false, () => c().setCellAttribute("ln", [1, 0, 1, 0]).run())}
+                  {btn("세로만", false, () => c().setCellAttribute("ln", [0, 1, 0, 1]).run())}
+                  {btn("없음", false, () => c().setCellAttribute("ln", [0, 0, 0, 0]).run())}
+                </div>
+                {btn("바깥 테두리", !!A("table").frame, () => c().updateAttributes("table", { frame: !A("table").frame }).run())}
                 <Swatches label="선 색" colors={["#231f20", "#58595b", "#939598", "#ffffff"]} onPick={(v) => c().updateAttributes("table", { lineColor: v ?? "#231f20" }).run()} />
                 <Num label="선 굵기" value={A("table").lineW} step={0.1} onSet={(v) => c().updateAttributes("table", { lineW: v ?? 0.5 }).run()} />
+              </G>
+              <G cap="크기">
                 <Num label="행 높이" value={rowHeightOf(editor.state)} onSet={(v) => setRowHeight(editor, v)} />
-                <div className="seg">{btn("표 전체", false, () => setRowHeight(editor, rowHeightOf(editor.state), true), "이 행 높이를 표의 모든 행에 적용합니다(여러 행은 칸을 끌어 선택한 뒤 높이를 넣어도 됩니다)")}</div>
+                {btn("표 전체", false, () => setRowHeight(editor, rowHeightOf(editor.state), true), "이 행 높이를 표의 모든 행에 적용합니다(여러 행은 칸을 끌어 선택한 뒤 높이를 넣어도 됩니다)")}
                 <Num label="열 너비 %" value={colPct} step={0.5} onSet={(v) => { if (v) setColumnPct(editor, v); }} width={50} />
-                <div className="seg">{btn("열 균등", false, () => equalizeColumns(editor), "모든 열을 같은 너비로")}</div>
+                {btn("열 균등", false, () => equalizeColumns(editor), "모든 열을 같은 너비로")}
                 <RatioInput value={colRatios} onApply={(nums) => {
                   if (!setColumnRatios(editor, nums)) setNote(`열 비율은 숫자 ${colRatios?.length ?? 0}개를 쉼표로 구분해 넣으세요.`);
                 }} />
                 <Num label="표 너비 %" value={A("table").widthPct} onSet={(v) => c().updateAttributes("table", { widthPct: v && v < 100 ? v : null }).run()} />
+              </G>
+              <G cap="배치">
                 <select value={A("table").float ?? ""} onChange={(e) => c().updateAttributes("table", { float: e.target.value || null }).run()} aria-label="표 배치" {...tip("표 배치")}>
                   <option value="">글과 따로</option><option value="left">왼쪽에 두고 글이 옆으로</option><option value="right">오른쪽에 두고 글이 옆으로</option>
                 </select>
                 <div className="seg">
-                  {btn("머리행 서식", false, () => applyHeaderStyle(editor), "첫 행을 회색으로, 모든 칸을 가운데 정렬로")}
-                  {btn("서식 복사", false, () => { const f = copyTableFormat(editor); setTableFmt(f); if (f) setNote("표 서식을 복사했습니다. 다른 표에 커서를 두고 '서식 붙여넣기'를 누르세요."); }, "선 색·굵기, 머리행·본문 배경과 정렬, 행 높이, 열 비율을 복사합니다")}
-                  {tableFmt && btn("서식 붙여넣기", false, () => pasteTableFormat(editor, tableFmt), "복사한 서식을 이 표에 입힙니다(열 수가 같으면 열 비율까지)")}
-                </div>
-                <div className="seg">
                   {btn("위에 줄", false, () => addLineNear(editor, "table", false), "표 바로 위에 빈 줄을 넣습니다")}
                   {btn("아래에 줄", false, () => addLineNear(editor, "table", true), "표 바로 아래에 빈 줄을 넣습니다")}
                 </div>
-                <div className="seg">{btn("표 삭제", false, () => c().deleteTable().run())}</div>
-              </>
-            )}
-            {inBox && !inTable && (
-              <>
-                <b>박스</b>
-                <div className="seg">
-                  {btn("테두리", !!A("box").border, () => c().updateAttributes("box", { border: !A("box").border }).run())}
-                  {btn("둥근 위 모서리", !!A("box").round, () => c().updateAttributes("box", { round: !A("box").round }).run())}
-                  {btn("용지 끝까지", !!A("box").bleed, () => c().updateAttributes("box", { bleed: !A("box").bleed }).run())}
-                </div>
+              </G>
+              <G cap="서식">
+                {btn("머리행 서식", false, () => applyHeaderStyle(editor), "첫 행을 회색으로, 모든 칸을 가운데 정렬로")}
+                {btn("서식 복사", false, () => { const f = copyTableFormat(editor); setTableFmt(f); if (f) setNote("표 서식을 복사했습니다. 다른 표에 커서를 두고 '서식 붙여넣기'를 누르세요."); }, "선 색·굵기, 머리행·본문 배경과 정렬, 행 높이, 열 비율을 복사합니다")}
+                {tableFmt && btn("서식 붙여넣기", false, () => pasteTableFormat(editor, tableFmt), "복사한 서식을 이 표에 입힙니다(열 수가 같으면 열 비율까지)")}
+              </G>
+              <span className="ctx-end">{btn("표 삭제", false, () => c().deleteTable().run())}</span>
+            </>
+          )}
+          {inBox && !inTable && (
+            <>
+              <span className="ctx-tag">박스</span>
+              <G cap="모양">
+                {btn("테두리", !!A("box").border, () => c().updateAttributes("box", { border: !A("box").border }).run())}
+                {btn("둥근 위 모서리", !!A("box").round, () => c().updateAttributes("box", { round: !A("box").round }).run())}
+                {btn("용지 끝까지", !!A("box").bleed, () => c().updateAttributes("box", { bleed: !A("box").bleed }).run())}
                 <Swatches label="테두리 색" colors={["#939598", "#231f20", "#58595b"]} onPick={(v) => c().updateAttributes("box", { borderColor: v ?? "#939598" }).run()} />
                 <Num label="테두리 굵기" value={A("box").borderW} step={0.1} onSet={(v) => c().updateAttributes("box", { borderW: v ?? 0.5 }).run()} />
+              </G>
+              <G cap="여백">
                 <Num label="안쪽 여백" value={A("box").pad} onSet={(v) => c().updateAttributes("box", { pad: v ?? 0 }).run()} />
                 <Num label="바깥 여백" value={A("box").margin} onSet={(v) => c().updateAttributes("box", { margin: v ?? null }).run()} />
-                <div className="seg">
-                  {btn("여기서 나누기", false, () => splitBox(editor), "커서가 있는 줄부터 새 박스로 나눕니다")}
-                  {canJoinPrevBox(editor.state) && btn("앞 박스와 합치기", false, () => joinPrevBox(editor), "바로 위 박스와 하나로 합칩니다")}
-                  {btn("선택 줄 박스 밖으로", false, () => liftOutOfBox(editor), "선택한 줄만 박스 밖으로 뺍니다")}
-                  {btn("박스 풀기", false, () => unwrapBox(editor), "박스를 없애고 내용만 남깁니다")}
-                </div>
+              </G>
+              <G cap="나누기·합치기">
+                {btn("여기서 나누기", false, () => splitBox(editor), "커서가 있는 줄부터 새 박스로 나눕니다")}
+                {canJoinPrevBox(editor.state) && btn("앞 박스와 합치기", false, () => joinPrevBox(editor), "바로 위 박스와 하나로 합칩니다")}
+                {btn("선택 줄 박스 밖으로", false, () => liftOutOfBox(editor), "선택한 줄만 박스 밖으로 뺍니다")}
+              </G>
+              <G cap="줄 넣기">
                 <div className="seg">
                   {btn("위에 줄", false, () => addLineNear(editor, "box", false), "박스 바로 위(밖)에 빈 줄을 넣습니다")}
                   {btn("아래에 줄", false, () => addLineNear(editor, "box", true), "박스 바로 아래(밖)에 빈 줄을 넣습니다")}
                 </div>
-              </>
-            )}
-            {inGallery && (
-              <>
-                <b>사진 묶음</b>
+              </G>
+              <span className="ctx-end">{btn("박스 풀기", false, () => unwrapBox(editor), "박스를 없애고 내용만 남깁니다")}</span>
+            </>
+          )}
+          {inGallery && (
+            <>
+              <span className="ctx-tag">사진 묶음</span>
+              <G cap="크기·배치">
                 <Num label="너비 %" value={A("gallery").widthPct} onSet={(v) => c().updateAttributes("gallery", { widthPct: v && v < 100 ? v : null }).run()} />
                 <select value={A("gallery").float ?? ""} onChange={(e) => c().updateAttributes("gallery", { float: e.target.value || null }).run()} aria-label="사진 묶음 배치" {...tip("사진 묶음 배치")}>
                   <option value="">글과 따로</option><option value="left">왼쪽에 두고 글이 옆으로</option><option value="right">오른쪽에 두고 글이 옆으로</option>
                 </select>
-              </>
-            )}
-            {inFigure && fig.w && (
-              <>
-                <b>캡션 그림</b>
+              </G>
+            </>
+          )}
+          {inFigure && fig.w && (
+            <>
+              <span className="ctx-tag">캡션 그림</span>
+              <G cap="크기">
                 <Num label="너비 pt" value={fig.w} onSet={(v) => { if (v && v > 4) c().updateAttributes("figure", { w: v, h: Math.round(((fig.h ?? v) * v) / (fig.w ?? v) * 10) / 10,
                   images: (fig.images ?? []).map((im) => ({ ...im, x: (im.x * v) / fig.w!, y: (im.y * v) / fig.w!, w: (im.w * v) / fig.w!, h: (im.h * v) / fig.w! })) }).run(); }} />
-                <div className="seg">{btn("그림 삭제", false, () => c().deleteNode("figure").run())}</div>
-              </>
-            )}
-            {isImage && (
-              <>
-                <b>이미지</b>
-                <Num label="너비 pt" value={A("image").widthPt} onSet={(v) => c().updateAttributes("image", { widthPt: v }).run()} />
-                <select value={A("image").float ?? ""} onChange={(e) => c().updateAttributes("image", { float: e.target.value || null }).run()} aria-label="이미지 배치" {...tip("이미지 배치")}>
+              </G>
+              <span className="ctx-end">{btn("그림 삭제", false, () => c().deleteNode("figure").run())}</span>
+            </>
+          )}
+          {isImage && (
+            <>
+              <span className="ctx-tag">이미지</span>
+              <G cap="크기">
+                <Num label="너비 pt" value={A("image").widthPt} onSet={(v) => setImageAttrs(editor, { widthPt: v })} />
+                {btn("칸에 맞추기", false, () => fitImage(editor))}
+              </G>
+              <G cap="배치">
+                <select value={A("image").float ?? ""} onChange={(e) => setImageAttrs(editor, { float: e.target.value || null })} aria-label="이미지 배치" {...tip("이미지 배치")}>
                   <option value="">글줄 안</option><option value="left">왼쪽에 두고 글이 옆으로</option><option value="right">오른쪽에 두고 글이 옆으로</option>
                 </select>
-              </>
-            )}
-          </>
-        )}
+                {A("image").float && (
+                  <select value={A("image").valign ?? ""} onChange={(e) => setImageAttrs(editor, { valign: e.target.value || null })} aria-label="옆 글 세로 위치" {...tip("옆 글 세로 위치")}>
+                    <option value="">옆 글: 위에 맞춤</option><option value="middle">옆 글: 세로 가운데</option>
+                  </select>
+                )}
+              </G>
+            </>
+          )}
         </div>
         {note && <div className="note" onClick={() => setNote("")}>{note}</div>}
         <div className="edscroll" ref={scrollRef}>

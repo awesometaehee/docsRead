@@ -137,7 +137,9 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .paper h2 { font-size: 10pt; line-height: 15pt; border-radius: 12pt 12pt 0 0; margin-top: 8pt; }
 .paper h3 { font-size: 1em; font-weight: 700; margin: 2.5pt 0 0; }
 .paper img { display: inline-block; max-width: 100%; height: auto; vertical-align: middle; }
-.paper table { border-collapse: collapse; width: var(--tw, 100%) !important; min-width: 0 !important; table-layout: fixed; margin: 1pt 0; --lc: #231f20; --lw: 0.5pt; }
+.paper table { border-collapse: collapse; width: var(--tw, 100%) !important; min-width: 0 !important; table-layout: fixed; margin: 1pt 0; }
+/* 괘선 색·굵기 기본값은 용지에 둔다(표·표 틀에 지정한 값이 이어받아 쓰이도록) */
+.paper { --lc: #231f20; --lw: 0.5pt; }
 .paper table.floated { margin: 2pt 8pt 2pt 0; }
 .paper td, .paper th { padding: 0 2pt; vertical-align: middle; font-weight: 400; position: relative; word-break: break-all; line-height: 1.2; }
 .paper td p, .paper th p { text-align: inherit; }
@@ -177,12 +179,20 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .paper .fig.ProseMirror-selectednode, .paper img.ProseMirror-selectednode { outline: 2px solid var(--accent); }
 .paper .tableWrapper { width: var(--tw, auto); overflow: visible; margin-top: 1pt; margin-bottom: 1pt; }
 .paper .tableWrapper.floated { margin: 2pt 8pt 2pt 0; }
+/* 오른쪽에 띄운 표는 오른쪽 끝에 붙이고, 글 쪽(왼쪽)으로 간격을 둔다 */
+.paper .tableWrapper.floated[style*="float: right"] { margin: 0 0 2pt 6pt; }
+.paper .tableWrapper.floated[style*="float: right"] > table.floated, .paper .tableWrapper.floated[style*="float: right"] table { margin: 0; }
 .paper .tableWrapper table { margin: 0; width: 100% !important; }
 .paper .column-resize-handle { position: absolute; right: -2px; top: 0; bottom: 0; width: 3px; background: var(--accent); pointer-events: none; z-index: 3; }
 .paper.resize-cursor { cursor: col-resize; }
 /* 상품설명서 */
 .paper.brochure h1 { font-size: 10pt; line-height: 13pt; border-radius: 9pt 9pt 0 0; }
 .paper.brochure h2 { font-size: 10pt; line-height: 12.5pt; border-radius: 9pt 9pt 0 0; margin-top: 6pt; }
+/* 박스 맨 위의 제목 띠는 박스에 딱 붙인다(위 여백 없음). 모서리는 박스가 잘라 주므로 띠 자체는 둥글리지 않는다.
+   상품설명서 제목 띠 규칙보다 뒤에 두어야 이긴다 */
+.paper.brochure .box > h1, .paper.brochure .box > h2, .paper.brochure .box > .modblock > h2 { margin-top: 0; border-radius: 0; }
+/* 표 바깥 테두리(표 속성 frame): 칸 괘선과 상관없이 표 둘레에 선을 긋는다 */
+.paper table.framed { border: var(--lw) solid var(--lc) !important; }
 .paper.brochure .ProseMirror > h2 ~ p, .paper.brochure .modblock > p, .paper.brochure .cols p { padding-left: 3.5pt; padding-right: 3.5pt; }
 .paper.brochure .ProseMirror > h2 ~ p.hang, .paper.brochure .modblock > p.hang, .paper.brochure .cols p.hang { padding-left: calc(3.5pt + var(--hang, 1.05em)); }
 .paper.brochure td, .paper.brochure th { padding: 0 1pt; line-height: 1.15; }
@@ -309,3 +319,86 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .tip p { margin: 0; color: #c9d1d9; }
 @media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
 @media print { .tip { display: none !important; } }
+/* 이미지 틀과 크기 조절 손잡이(선택했을 때만 보임) */
+.paper .imgwrap { position: relative; display: inline-block; max-width: 100%; vertical-align: middle; line-height: 0; }
+.paper .imgwrap img { max-width: 100%; }
+.paper .img-strut { width: 0; vertical-align: middle; }
+.paper .imgnode.ProseMirror-selectednode img { outline: 2px solid var(--accent); outline-offset: 1px; }
+.paper .img-handle { display: none; position: absolute; right: -5px; bottom: -5px; width: 10px; height: 10px; box-sizing: border-box;
+  background: var(--accent); border: 2px solid #fff; border-radius: 2px; box-shadow: 0 0 0 1px var(--accent); cursor: nwse-resize; touch-action: none; }
+.paper .imgnode.ProseMirror-selectednode .img-handle { display: block; }
+.paper .img-size { position: absolute; right: 0; top: -20px; padding: 3px 6px; border-radius: 4px; background: #1f2328; color: #fff;
+  font: 600 11px/1 system-ui, sans-serif; white-space: nowrap; pointer-events: none; }
+@media print { .paper .img-handle, .paper .img-size { display: none !important; } .paper .imgwrap img { outline: 0 !important; } }
+
+/* ── 편집 도구 모음 리디자인: 이름표 붙은 묶음 + 가벼운 버튼 ── */
+.edbar { gap: 6px 12px; }
+.edbar.tools { gap: 0; padding: 5px 12px; font-size: 12px; min-height: 38px; box-sizing: border-box; }
+.tg { display: inline-flex; align-items: center; gap: 4px; padding: 0 10px; border-left: 1px solid #e6e9ee; white-space: nowrap; }
+.edbar.tools > .tg:first-child, .edview > .tg:first-child, .ctx-tag + .tg { border-left: 0; padding-left: 0; }
+.tg-cap { font-size: 10.5px; font-weight: 600; color: #98a1ad; letter-spacing: .02em; margin-right: 3px; user-select: none; }
+.edview { gap: 0; }
+.edview > .tg { padding: 0 10px; }
+.edview > button { margin-left: 4px; }
+/* 버튼: 평소엔 테두리 얇게, 켜짐은 옅은 파랑, 위험은 빨강 글씨 */
+.edbar.tools button, .edview button { font: inherit; font-size: 12px; height: 26px; padding: 0 9px; border: 1px solid #d9dde3; border-radius: 6px;
+  background: #fff; color: var(--ink); cursor: pointer; transition: background .1s, border-color .1s; }
+.edbar.tools button:hover, .edview button:hover { background: #f2f4f7; border-color: #c4cad3; }
+.edbar.tools button.on, .edview button.on { background: #e8eefd; border-color: #a9bdf3; color: var(--accent); font-weight: 600; }
+.edbar.tools button.primary, .edview button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.edbar.tools button.primary:hover, .edview button.primary:hover { background: #1a43b8; }
+.edbar.tools button.danger { color: #b42318; border-color: #f1c4bf; }
+.edbar.tools button.danger:hover { background: #fef3f2; border-color: #e59a92; }
+/* 묶음 버튼(세그먼트): 이어 붙은 한 덩어리 */
+.edbar.tools .seg, .edview .seg { border: 0; border-radius: 6px; overflow: visible; gap: 0; }
+.edbar.tools .seg button { border-radius: 0; margin-left: -1px; padding: 0 9px; border-right: 1px solid #d9dde3; }
+.edbar.tools .seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.edbar.tools .seg button:last-child { border-radius: 0 6px 6px 0; border-right: 1px solid #d9dde3; }
+.edbar.tools .seg button:only-child { border-radius: 6px; }
+.edbar.tools .seg button.on { position: relative; z-index: 1; border-color: #a9bdf3; }
+.edbar.tools .seg button.danger { border-color: #f1c4bf; }
+/* 입력 칸·목록·색 */
+.edbar.tools select, .edview select { height: 26px; font: inherit; font-size: 12px; border: 1px solid #d9dde3; border-radius: 6px; padding: 0 4px; background: #fff; max-width: 190px; }
+.edbar.tools .num, .edview .num { color: #59616d; gap: 4px; }
+.edbar.tools .num input, .edview .num input { height: 26px; box-sizing: border-box; border: 1px solid #d9dde3; border-radius: 6px; padding: 0 5px; text-align: right; }
+.edbar.tools .num.ratio input { text-align: left; }
+.edbar.tools select:focus, .edbar.tools .num input:focus, .edview .num input:focus, .edview select:focus { outline: 2px solid #a9bdf3; outline-offset: 0; border-color: var(--accent); }
+.edbar.tools .sw { height: 26px; box-sizing: border-box; border-color: #d9dde3; border-radius: 6px; padding: 0 5px; gap: 3px; }
+.edbar.tools .sw button { width: 15px; height: 15px; padding: 0; border: 1px solid #b9bec6; border-radius: 3px; }
+.edbar.tools .sw button:hover { transform: scale(1.15); background-color: inherit; }
+.edbar.tools .sw button.none { width: 16px; height: 16px; line-height: 13px; border: 0; color: var(--mute); background: none; }
+.edbar.tools .sw em { color: #59616d; }
+.edview .pages { padding: 0 2px 0 4px; }
+/* 선택 대상 줄: 대상 이름표 + 묶음, 지울 때 쓰는 버튼은 오른쪽 끝 */
+.edbar.ctx { background: #f8f9fb; height: 76px; align-content: center; row-gap: 6px; border-bottom: 1px solid var(--line); }
+.edbar.ctx.active { background: #f4f7ff; box-shadow: inset 3px 0 0 var(--accent); }
+.ctx-tag { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; margin-right: 10px; border-radius: 11px; background: var(--accent); color: #fff; font-size: 11.5px; font-weight: 700; white-space: nowrap; }
+.ctx-end { margin-left: auto; padding-left: 10px; }
+.ctxhint { color: #8a929e; }
+/* Ctrl+클릭으로 따로 고른 칸도 같은 선택 표시 */
+.paper td.selectedCell, .paper th.selectedCell { position: relative; }
+/* 선택 대상 줄은 두 줄 안에 들도록 조금 더 촘촘하게 */
+.edbar.ctx .tg { padding: 0 8px; gap: 3px; }
+.edbar.ctx .num.ratio input { width: 120px !important; }
+.edbar.ctx select { max-width: 150px; }
+.edbar.ctx button { padding: 0 7px; }
+/* 선택 대상 줄: 스크롤로 숨기지 않는다. 두 줄 높이는 늘 확보하고, 화면이 좁아 더 필요하면 늘어난다 */
+.edbar.ctx { height: auto; min-height: 76px; overflow: visible; align-content: center; }
+/* 1·2줄도 가로 스크롤로 숨기지 않고, 좁으면 다음 줄로 넘긴다 */
+.edbar.tools:not(.ctx) { flex-wrap: wrap; overflow: visible; row-gap: 5px; }
+.edbar { flex-wrap: wrap; }
+/* 인쇄: 배경색(머리행 회색·칸 색·제목 띠)을 그대로 찍고, 용지 높이를 편집 화면의 쪽 수에 딱 맞춘다.
+   쪽 아래 고정 꼬리말이 용지 끝에 닿아 있어 소수점 몇 px 만 넘쳐도 빈 장이 하나 더 나오기 때문 */
+@media print {
+  .paper, .paper * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .paper { height: calc(var(--pages, 1) * var(--ph, 841.9pt)) !important; overflow: hidden; }
+  .paper .selectedCell::after { display: none !important; }
+  .paper .ProseMirror-selectednode { outline: 0 !important; }
+}
+/* 인쇄 괘선 덧그림(printLines.ts): 인쇄 중에는 CSS 테두리를 투명하게 하고(자리는 그대로) SVG 선만 보인다 */
+.paper { position: relative; }
+.paper > svg.print-lines { display: none; }
+@media print {
+  .paper > svg.print-lines { display: block; position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; z-index: 5; }
+  .paper.print-lines-on table, .paper.print-lines-on td, .paper.print-lines-on th { border-color: transparent !important; }
+}

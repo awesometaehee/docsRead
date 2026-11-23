@@ -1,7 +1,7 @@
 import { Extension, mergeAttributes, Node } from "@tiptap/core";
 import type { Editor } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
-import { TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import Paragraph from "@tiptap/extension-paragraph";
 import Color from "@tiptap/extension-color";
@@ -326,12 +326,98 @@ const Img = Image.extend({
       ...this.parent?.(),
       widthPt: { default: null, renderHTML: () => ({}) },
       float: { default: null, renderHTML: () => ({}) },
+      valign: { default: null, renderHTML: () => ({}) },   // 띄운 이미지 옆 글의 세로 위치: null=위, "middle"=가운데
     };
   },
   renderHTML({ node, HTMLAttributes }) {
     const a = node.attrs;
     const style = [a.widthPt ? `width:${a.widthPt}pt` : "", a.float ? `float:${a.float};margin:2pt ${a.float === "left" ? "6pt 2pt 0" : "0 2pt 6pt"}` : ""].filter(Boolean).join(";");
     return ["img", mergeAttributes(HTMLAttributes, style ? { style } : {})];
+  },
+  /**
+   * 편집 화면: 이미지를 감싼 틀에 모서리 손잡이를 둔다. 선택하면 오른쪽 아래 손잡이가 보이고,
+   * 끌면 비율을 유지한 채 너비가 바뀐다(놓을 때 widthPt 로 저장). 칸·글 폭보다 커지지 않는다.
+   */
+  addNodeView() {
+    return ({ node, getPos, editor }) => {
+      let current = node;
+      // dom(글줄 안 자리) > wrap(띄우는 틀: 이미지·손잡이) + strut(이미지 높이만 한 보이지 않는 받침)
+      const dom = document.createElement("span");
+      dom.className = "imgnode";
+      const wrap = document.createElement("span");
+      wrap.className = "imgwrap";
+      const img = document.createElement("img");
+      const handle = document.createElement("span");
+      handle.className = "img-handle";
+      handle.title = "끌어서 크기 조절(비율 유지)";
+      wrap.append(img, handle);
+      // 받침이 첫 줄을 이미지 높이로 키우고 가운데에 놓여, 옆 글이 이미지 세로 가운데에 온다
+      const strut = document.createElement("span");
+      strut.className = "img-strut";
+      dom.append(wrap, strut);
+      const syncStrut = () => { strut.style.height = `${img.offsetHeight}px`; };
+      const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncStrut) : null;
+      ro?.observe(img);
+
+      const apply = (n: PMNode) => {
+        const a = n.attrs;
+        if (img.getAttribute("src") !== a.src) img.src = a.src;
+        if (a.alt) img.alt = a.alt; else img.removeAttribute("alt");
+        img.style.width = a.widthPt ? `${a.widthPt}pt` : "";
+        wrap.style.float = a.float ?? "";
+        wrap.style.margin = a.float ? `2pt ${a.float === "left" ? "6pt 2pt 0" : "0 2pt 6pt"}` : "";
+        strut.style.display = a.float && a.valign === "middle" ? "inline-block" : "none";
+        syncStrut();
+      };
+      apply(node);
+
+      handle.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = img.getBoundingClientRect();
+        const scale = rect.width / (img.offsetWidth || rect.width || 1);   // 화면 확대 배율
+        const startX = e.clientX;
+        const startW = rect.width / scale;                                 // CSS px
+        const host = (dom.closest("td,th") ?? dom.parentElement) as HTMLElement | null;
+        const cs = host ? getComputedStyle(host) : null;
+        const maxW = host ? host.clientWidth - parseFloat(cs!.paddingLeft) - parseFloat(cs!.paddingRight) : Infinity;
+        const badge = document.createElement("span");
+        badge.className = "img-size";
+        wrap.append(badge);
+        let w = startW;
+        const move = (ev: PointerEvent) => {
+          w = Math.max(8, Math.min(maxW, startW + (ev.clientX - startX) / scale));
+          img.style.width = `${w}px`;
+          badge.textContent = `${Math.round(w * 0.75)}pt`;
+        };
+        const up = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+          badge.remove();
+          const pos = typeof getPos === "function" ? getPos() : undefined;
+          if (pos == null) return;
+          const widthPt = Math.round(w * 0.75 * 10) / 10;
+          const tr = editor.view.state.tr.setNodeMarkup(pos, undefined, { ...current.attrs, widthPt });
+          tr.setSelection(NodeSelection.create(tr.doc, pos));   // 끌고 나서도 선택(손잡이)을 유지
+          editor.view.dispatch(tr);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+      });
+
+      return {
+        dom,
+        destroy() { ro?.disconnect(); },
+        update(n: PMNode) {
+          if (n.type !== current.type) return false;
+          current = n;
+          apply(n);
+          return true;
+        },
+        stopEvent: (e: Event) => e.target === handle,      // 손잡이 조작은 편집기 선택·끌어 옮기기로 넘기지 않는다
+        ignoreMutation: () => true,                         // 크기 미리보기용 스타일 변경은 문서 변경이 아니다
+      };
+    };
   },
 }).configure({ inline: true });
 
@@ -371,6 +457,17 @@ function applyTableLook(dom: HTMLElement, node: PMNode) {
   if (a.widthPct) dom.style.setProperty("--tw", `${a.widthPct}%`); else dom.style.removeProperty("--tw");
   dom.style.float = a.float ?? "";
   dom.classList.toggle("floated", !!a.float);
+  // 열 너비(px)는 '비율'로만 쓴다: 고정 배치 표는 열 합계보다 좁아질 수 없어서, px 합이 본문 폭보다 크면
+  // 표가 오른쪽 여백을 넘어간다. 모든 열에 너비가 있으면 합계 대비 %로 바꿔 늘 본문 폭(또는 표 너비 %)에 맞춘다.
+  const table = dom.querySelector("table");
+  if (!table) return;
+  table.classList.toggle("framed", !!a.frame);
+  const cols = [...table.querySelectorAll<HTMLElement>(":scope > colgroup > col")];
+  const px = cols.map((c) => (c.style.width.endsWith("px") ? parseFloat(c.style.width) : 0));
+  const sum = px.reduce((s, w) => s + w, 0);
+  if (cols.length && px.every((w) => w > 0)) cols.forEach((c, i) => { c.style.width = `${(px[i] / sum) * 100}%`; });
+  table.style.width = "";
+  table.style.minWidth = "";
 }
 class LookTableView extends TableView {
   constructor(node: PMNode, cellMinWidth: number) {
@@ -389,13 +486,14 @@ const Tbl = Table.extend({
   addAttributes() {
     const hidden = { rendered: false };
     return { ...this.parent?.(), lineColor: { default: "#231f20", ...hidden }, lineW: { default: 0.5, ...hidden },
-      float: { default: null, ...hidden }, widthPct: { default: null, ...hidden } };
+      float: { default: null, ...hidden }, widthPct: { default: null, ...hidden }, frame: { default: false, ...hidden } };
   },
   renderHTML(props) {
     const spec = this.parent?.(props) as unknown as [string, Record<string, unknown>, ...unknown[]];
     const a = props.node.attrs;
     const extra = [`--lc:${a.lineColor}`, `--lw:${Math.max(0.3, a.lineW)}pt`, a.widthPct ? `--tw:${a.widthPct}%` : "", a.float ? `float:${a.float}` : ""].filter(Boolean).join(";");
-    spec[1] = { ...spec[1], style: `${(spec[1]?.style as string | undefined) ?? ""};${extra}`, class: a.float ? "floated" : undefined };
+    const cls = [a.float ? "floated" : "", a.frame ? "framed" : ""].filter(Boolean).join(" ") || undefined;
+    spec[1] = { ...spec[1], style: `${(spec[1]?.style as string | undefined) ?? ""};${extra}`, class: cls };
     return spec as never;
   },
 });

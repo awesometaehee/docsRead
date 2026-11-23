@@ -507,3 +507,51 @@ export function clearTextStyleAttr(editor: Editor, attr: "color" | "fontSize"): 
   view.focus();
   return true;
 }
+
+/* ---------- 이미지 칸에 맞추기 ---------- */
+
+/**
+ * 선택한 이미지를 칸(표 안) 또는 글 폭(표 밖)에 맞춘다. 비율은 유지한다.
+ * 표 안이고 그 행에 높이가 정해져 있으면 높이도 넘지 않게 맞춘다.
+ */
+/** 선택한 이미지의 속성을 바꾸고 선택을 유지한다(도구 줄의 칸·목록을 쓴 뒤에도 이미지 도구가 남도록). */
+export function setImageAttrs(editor: Editor, attrs: Record<string, unknown>): boolean {
+  const { state, view } = editor;
+  const sel = state.selection;
+  if (!(sel instanceof NodeSelection) || sel.node.type.name !== "image") return false;
+  const tr = state.tr.setNodeMarkup(sel.from, undefined, { ...sel.node.attrs, ...attrs });
+  tr.setSelection(NodeSelection.create(tr.doc, sel.from));
+  view.dispatch(tr);
+  view.focus();
+  return true;
+}
+
+export function fitImage(editor: Editor): boolean {
+  const { state, view } = editor;
+  const sel = state.selection;
+  if (!(sel instanceof NodeSelection) || sel.node.type.name !== "image") return false;
+  const wrap = view.nodeDOM(sel.from) as HTMLElement | null;
+  const img = wrap?.querySelector("img") ?? (wrap instanceof HTMLImageElement ? wrap : null);
+  if (!wrap || !img) return false;
+  const host = (wrap.closest("td,th") ?? wrap.parentElement) as HTMLElement | null;
+  if (!host) return false;
+  const cs = getComputedStyle(host);
+  const pxToPt = 0.75;
+  // 칸 안쪽 너비(CSS px)
+  const innerW = host.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  let maxWpt = innerW * pxToPt;
+  const ratio = img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight
+    : (img.getBoundingClientRect().width / (img.getBoundingClientRect().height || 1));
+  const row = host.closest("tr") as HTMLElement | null;
+  const rowH = row?.style.height.endsWith("pt") ? parseFloat(row.style.height) : NaN;
+  if (host.matches("td,th") && rowH > 0) {
+    const padV = (parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)) * pxToPt;
+    maxWpt = Math.min(maxWpt, (rowH - padV - 1) * ratio);   // 행 높이 안에 들도록
+  }
+  const widthPt = Math.max(4, Math.floor(maxWpt * 10) / 10);
+  const tr = state.tr.setNodeMarkup(sel.from, undefined, { ...sel.node.attrs, widthPt });
+  tr.setSelection(NodeSelection.create(tr.doc, sel.from));
+  view.dispatch(tr);
+  view.focus();
+  return true;
+}
