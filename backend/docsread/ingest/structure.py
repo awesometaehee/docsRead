@@ -118,17 +118,27 @@ def _xy_order(units: list[tuple[tuple, object]]) -> list:
     if len(units) <= 1:
         return [u for _, u in units]
 
-    def gaps(lo, hi, min_gap):
-        ivs = sorted((b[lo], b[hi]) for b, _ in units)
+    def gaps(lo, hi, min_gap, slack=0.0):
+        """가장 넓은 빈 띠(폭, 자를 위치). slack 만큼 각 상자를 안쪽으로 줄여 잰다(살짝 겹친 단 경계 허용)."""
+        ivs = sorted((b[lo] + slack, max(b[lo] + slack, b[hi] - slack)) for b, _ in units)
         best, cut, end = 0.0, None, ivs[0][1]
         for a, b in ivs[1:]:
             if a - end >= min_gap and a - end > best:
                 best, cut = a - end, (a + end) / 2
             end = max(end, b)
-        return best, cut
+        return best - 2 * slack, cut
 
     gy, cy = gaps(1, 3, 2.0)
-    gx, cx = gaps(0, 2, 5.0)
+    # 단 사이 여백: 상품설명서 유의사항처럼 단 간격이 2~5pt 로 좁거나, 글줄 끝이 1~2pt 넘어 맞닿는 경우가 있다
+    gx, cx = gaps(0, 2, 4.0, slack=1.5)
+    if cx is not None and cy is not None:
+        # 왼쪽·오른쪽이 각각 영역 높이 대부분을 차지하면 진짜 단 경계다: 단부터 나눈다(왼쪽 단 → 오른쪽 단).
+        # 그렇지 않으면 더 넓은 빈 띠를 먼저 자른다.
+        y0, y1 = min(b[1] for b, _ in units), max(b[3] for b, _ in units)
+        sides = ([b for b, _ in units if (b[0] + b[2]) / 2 < cx], [b for b, _ in units if (b[0] + b[2]) / 2 >= cx])
+        tall = all(s and (max(b[3] for b in s) - min(b[1] for b in s)) >= 0.6 * (y1 - y0) for s in sides)
+        if tall and min(len(s) for s in sides) >= 2:
+            cy = None
     if cy is not None and (cx is None or gy >= gx):   # 더 넓은 빈 띠를 먼저 자른다(단 사이 여백 > 글머리 간격)
         top = [u for u in units if (u[0][1] + u[0][3]) / 2 < cy]
         return _xy_order(top) + _xy_order([u for u in units if (u[0][1] + u[0][3]) / 2 >= cy])
@@ -143,7 +153,11 @@ def reading_order(pd: PageData) -> list[Line]:
     by_table: dict[int, list[Line]] = {}
     for ln in pd.lines:
         if ln.table is None:
-            units.append((ln.bbox, [ln]))
+            # 글줄 상자는 글꼴의 위·아래 여유까지 들어가 실제 글자보다 훨씬 높다(10pt 제목이 34pt).
+            # 그대로 쓰면 제목이 바로 아래 본문과 겹쳐 빈 띠를 못 찾으므로, 글자 크기만 한 높이로 줄여 잰다.
+            size = max((s["size"] for s in ln.spans), default=ln.bbox[3] - ln.bbox[1])
+            cy, h = (ln.bbox[1] + ln.bbox[3]) / 2, min(size * 0.5, (ln.bbox[3] - ln.bbox[1]) / 2)
+            units.append(((ln.bbox[0], cy - h, ln.bbox[2], cy + h), [ln]))
         else:
             by_table.setdefault(ln.table, []).append(ln)
     for ti, lines in by_table.items():
@@ -164,11 +178,20 @@ def build_blocks(pages: list[PageData], doc_type: str) -> list[dict]:
     container: int | None = None       # 현재 조/섹션의 seq
     para: list[Line] = []
     para_page = 0
+    side_heads: set[int] = set()       # 같은 줄에 나란히 놓인 제목들(왼쪽 단 제목 · 오른쪽 단 제목)
+    page_w = 595.3
 
     def add(kind, page_no, parent=None, **kw) -> int:
         blocks.append({"seq": len(blocks), "parent_seq": parent, "page_no": page_no, "kind": kind,
                        "label": None, "title": None, "text": "", "content": {}, "bbox": None, **kw})
         return len(blocks) - 1
+
+    def owner(bbox) -> int | None:
+        """나란한 제목 아래에 있다가 쪽 폭 전체를 차지하는 내용이 나오면 그 단 제목에서 벗어난다."""
+        nonlocal container
+        if container in side_heads and bbox and bbox[0] < page_w * 0.15 and bbox[2] > page_w * 0.85:
+            container = None
+        return container
 
     def flush():
         nonlocal para
@@ -177,11 +200,12 @@ def build_blocks(pages: list[PageData], doc_type: str) -> list[dict]:
         runs = _runs(para, body)
         bb = [min(l.bbox[0] for l in para), min(l.bbox[1] for l in para),
               max(l.bbox[2] for l in para), max(l.bbox[3] for l in para)]
-        add("paragraph", para_page, container, text=_plain(runs), content={"runs": runs},
+        add("paragraph", para_page, owner(bb), text=_plain(runs), content={"runs": runs},
             bbox=[round(v, 1) for v in bb])
         para = []
 
     for pno, pd in enumerate(pages):
+        page_w = pd.width
         pd.lines = reading_order(pd)
         # 그림 캡션: 이미지 바로 아래, 가로로 겹치는 짧은 글줄
         figures = []
@@ -193,8 +217,11 @@ def build_blocks(pages: list[PageData], doc_type: str) -> list[dict]:
             for ln in pd.lines:
                 if ln.used or ln.table is not None or len(ln.text.strip()) > 40:
                     continue
+                if ln.spans[0]["w"] >= 600 and ln.spans[0]["size"] >= max(body * 1.18, 9.0):
+                    continue    # 제목 크기의 굵은 글은 캡션이 아니다(큰 사진 띠 바로 아래 섹션 제목)
                 lx = (ln.bbox[0] + ln.bbox[2]) / 2
-                if x0 - 4 <= lx <= x1 + 4 and -2 <= ln.bbox[1] - y1 <= 14 and (cap is None or ln.bbox[1] < cap.bbox[1]):
+                # 캡션 글줄 상자가 그림 아래 끝과 몇 pt 겹치는 경우가 많다(글줄 상자의 위 여유)
+                if x0 - 4 <= lx <= x1 + 4 and -6 <= ln.bbox[1] - y1 <= 14 and (cap is None or ln.bbox[1] < cap.bbox[1]):
                     cap = ln
             if cap is not None and doc_type == "brochure":
                 cap.used = True
@@ -226,7 +253,7 @@ def build_blocks(pages: list[PageData], doc_type: str) -> list[dict]:
                         content["row_h"] = content["row_h"][1:]
                         content["records"] = [dict(r, row=r["row"] - 1) for r in content["records"] if r["row"] > 0]
                         text = " | ".join(c["text"] for c in content["cells"] if c["text"])
-                    add("table", pno, container, text=text, content=content, bbox=[round(v, 1) for v in t.bbox])
+                    add("table", pno, owner(t.bbox), text=text, content=content, bbox=[round(v, 1) for v in t.bbox])
                 prev = None
                 continue
             text = ln.text.strip()
@@ -263,6 +290,12 @@ def build_blocks(pages: list[PageData], doc_type: str) -> list[dict]:
                 flush()
                 kind = "title" if not any(b["kind"] in ("title", "section", "article") for b in blocks) else "section"
                 seq = add(kind, pno, None, title=norm(text), text=norm(text), bbox=[round(v, 1) for v in ln.bbox])
+                # 같은 쪽·같은 높이에 가로로 떨어진 제목이 이미 있으면 둘 다 단 제목으로 표시한다
+                for other in blocks[:-1]:
+                    ob = other["bbox"]
+                    if (other["kind"] in ("title", "section") and other["page_no"] == pno and ob
+                            and abs(ob[1] - ln.bbox[1]) < 4 and (ob[2] < ln.bbox[0] or ln.bbox[2] < ob[0])):
+                        side_heads.update({other["seq"], seq})
                 container = seq
                 prev = None
                 continue

@@ -402,3 +402,9 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
   .paper > svg.print-lines { display: block; position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; z-index: 5; }
   .paper.print-lines-on table, .paper.print-lines-on td, .paper.print-lines-on th { border-color: transparent !important; }
 }
+/* 나란히 놓기(splitLayout.ts): 단마다 내용이 따로인 좌우 배치. 너비는 단의 w 비율 */
+.paper .split { display: flex; align-items: flex-start; margin: 0; }
+.paper .split > .splitcol { min-width: 0; }
+.paper .split > .splitcol > :first-child { margin-top: 0; }
+.paper.marks .split > .splitcol { outline: 1px dashed #c5cfe6; outline-offset: -1px; }
+@media print { .paper .split > .splitcol { outline: 0 !important; } }

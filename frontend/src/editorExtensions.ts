@@ -1,4 +1,5 @@
 import { Extension, mergeAttributes, Node } from "@tiptap/core";
+import { Split, SplitCol } from "./splitLayout";
 import type { Editor } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
@@ -516,7 +517,7 @@ export const extensions = [
   // 기본 정렬은 용지 스타일(본문 양쪽, 제목 가운데)에 맡기고, 직접 고른 정렬만 문단에 기록한다
   TextAlign.configure({ types: ["paragraph", "heading"], defaultAlignment: null as never }),
   Tbl.configure({ resizable: true, View: LookTableView as never, cellMinWidth: 8, lastColumnResizable: true }), Row, Cell, Header,
-  Variable, ModuleBlock, Columns, ColumnBreak, Region, Box, Figure, Gallery,
+  Variable, ModuleBlock, Columns, ColumnBreak, Region, Box, Figure, Gallery, Split, SplitCol,
 ];
 
 /** 모듈 문안(템플릿)을 편집기 인라인 노드로 만든다. 변수는 기본값으로 채운다. */

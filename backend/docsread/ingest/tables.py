@@ -119,7 +119,33 @@ def collect_segments(drawings, page_w: float, page_h: float):
         if dark:
             VH.extend(H[nH:])
             VV.extend(V[nV:])
-    return H, V, fills, (VH, VV, pens)
+    # 쪽 밖(대지·여백 바깥)에 그려진 선은 버리고, 걸친 선은 쪽 안으로 자른다.
+    # 원본에 쪽 오른쪽 바깥까지 이어진 선이 있으면 쪽 밖에 빈 열이 생겨 표가 용지보다 넓어진다.
+    # 쪽 가장자리를 넘는 가로선은 쪽 끝이 아니라 쪽 안 가장 바깥 세로선까지만 남긴다
+    # (쪽 밖까지 이어진 띠 배경이 쪽 끝에 가짜 열을 만들지 않도록)
+    inside_x = [x for x, _, _ in V if 0 <= x <= page_w]
+    left_x, right_x = (min(inside_x), max(inside_x)) if inside_x else (0.0, page_w)
+
+    def clip_h(segs):
+        out = []
+        for y, a, b in segs:
+            a = a if a >= 0 else max(0.0, left_x)
+            b = b if b <= page_w else min(page_w, right_x)
+            if 0 <= y <= page_h and b - a > 2:
+                out.append((y, a, b))
+        return out
+
+    def clip_v(segs):
+        out = []
+        for x, a, b in segs:
+            a, b = max(a, 0.0), min(b, page_h)
+            if 0 <= x <= page_w and b - a > 2:
+                out.append((x, a, b))
+        return out
+
+    fills = [(max(x0, 0.0), max(y0, 0.0), min(x1, page_w), min(y1, page_h), c, s)
+             for x0, y0, x1, y1, c, s in fills if x1 > 0 and x0 < page_w and y1 > 0 and y0 < page_h]
+    return clip_h(H), clip_v(V), fills, (clip_h(VH), clip_v(VV), pens)
 
 
 def _cluster(values: list[float], tol: float) -> list[float]:
@@ -172,6 +198,27 @@ def _bbox(hs, vs):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _rows_align(ca, cb) -> bool:
+    """좌우로 붙은 두 조각이 같은 표의 열 조각인가: 안쪽 가로선(행 경계) 위치가 서로 맞아야 한다.
+
+    흰 여백 열로 끊긴 한 표는 행 경계가 같다. 반면 글상자(안쪽 가로선 없음) 옆에 붙은 사진 격자처럼
+    서로 다른 틀은 행 경계가 맞지 않으므로 합치지 않는다(합치면 글상자가 격자 행에 맞춰 잘린다).
+    """
+    if not ca[0] or not cb[0]:
+        return True     # 세로선뿐인 조각(머리행 오른쪽 끝 선 등)은 행을 만들지 않으므로 합쳐도 된다
+
+    def inner(hs, box):
+        return _cluster([y for y, _, _ in hs if box[1] + SNAP < y < box[3] - SNAP], SNAP)
+    ya, yb = inner(ca[0], ca[2]), inner(cb[0], cb[2])
+    if not ya and not yb:
+        return True
+    if not ya or not yb:
+        return False
+    small, big = (ya, yb) if len(ya) <= len(yb) else (yb, ya)
+    hit = sum(1 for y in small if any(abs(y - z) <= SNAP for z in big))
+    return hit >= max(1, 0.6 * len(small))
+
+
 def _merge_close(comps, gap: float = 4.0):
     """흰 여백(3pt)으로 떨어진 좌우/상하 조각을 하나의 표로 합친다."""
     comps = [(hs, vs, _bbox(hs, vs)) for hs, vs in comps if hs or vs]
@@ -181,6 +228,9 @@ def _merge_close(comps, gap: float = 4.0):
         for i in range(len(comps)):
             for j in range(i + 1, len(comps)):
                 a, b = comps[i][2], comps[j][2]
+                side = min(a[3], b[3]) - max(a[1], b[1]) >= 0 and (a[2] <= b[0] + 0.5 or b[2] <= a[0] + 0.5)
+                if side and not _rows_align(comps[i], comps[j]):
+                    continue
                 if a[0] - gap <= b[2] and b[0] - gap <= a[2] and a[1] - gap <= b[3] and b[1] - gap <= a[3]:
                     hs, vs = comps[i][0] + comps[j][0], comps[i][1] + comps[j][1]
                     comps[i] = (hs, vs, _bbox(hs, vs))

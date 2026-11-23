@@ -91,10 +91,23 @@ def table_node(content: dict, bbox=None, images: list[dict] | None = None, attrs
                 y0, y1 = bbox[1] + ys[c["r"]], bbox[1] + ys[c["r"] + c["rs"]]
                 inside = [im for im in images if x0 <= (im["bbox"][0] + im["bbox"][2]) / 2 <= x1
                           and y0 <= (im["bbox"][1] + im["bbox"][3]) / 2 <= y1]
-                pics = [{"type": "image", "attrs": {"src": f"/api/assets/{im['asset']}.png", "alt": "",
-                                                    "widthPt": round(im["bbox"][2] - im["bbox"][0], 1)}} for im in inside]
-                if pics:
-                    body = [{"type": "paragraph", "content": pics}] + ([] if not c["text"] else body)
+                def pic(im):
+                    a = {"src": f"/api/assets/{im['asset']}.png", "alt": "", "widthPt": round(im["bbox"][2] - im["bbox"][0], 1)}
+                    # 글이 있는 칸에서 그림이 칸 폭의 일부만 차지하면 원본처럼 한쪽에 두고 글을 옆으로 흘린다
+                    # (예: 오마주 '[타입1] 사진형' 칸 — 왼쪽 사진, 오른쪽 설명). 위에 쌓으면 행이 원본보다 높아진다.
+                    if c["text"] and im["bbox"][2] - im["bbox"][0] < 0.6 * (x1 - x0):
+                        a["float"] = "left" if im["bbox"][0] - x0 <= x1 - im["bbox"][2] else "right"
+                    return {"type": "image", "attrs": a}
+                pics = [pic(im) for im in inside]
+                floated = [p for p in pics if p["attrs"].get("float")]
+                stacked = [p for p in pics if not p["attrs"].get("float")]
+                if floated and body:
+                    # 띄운 그림은 첫 글 문단 맨 앞에 둔다(그림만 든 문단은 빈 줄 한 줄 높이를 더 차지한다)
+                    body[0] = {**body[0], "content": floated + (body[0].get("content") or [])}
+                elif floated:
+                    stacked = floated + stacked
+                if stacked:
+                    body = [{"type": "paragraph", "content": stacked}] + ([] if not c["text"] else body)
             cells.append({"type": "tableCell",
                           "attrs": {"colspan": c["cs"], "rowspan": c["rs"], "background": c.get("fill"),
                                     "align": c.get("align", "left"), "colwidth": widths,
@@ -328,6 +341,79 @@ def page_style(doc: Document, blocks: list[Block]) -> dict:
             "page_w": round(w, 1), "page_h": round(h, 1), "pad": PAD, "doc_type": doc.doc_type}
 
 
+def _union(boxes):
+    boxes = [b for b in boxes if b]
+    if not boxes:
+        return None
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+
+
+def _beside(a, b) -> bool:
+    """두 상자가 좌우로 나란한가: 세로로 충분히 겹치고 가로로는 떨어져 있다."""
+    h = min(a[3] - a[1], b[3] - b[1])
+    if h <= 4:
+        return False
+    overlap = min(a[3], b[3]) - max(a[1], b[1])
+    return overlap > 0.3 * h and (a[2] <= b[0] + 3 or b[2] <= a[0] + 3)
+
+
+def side_by_side(items: list[tuple[list[dict], list | None]]) -> list[tuple[list[dict], list | None]]:
+    """나란히 놓인 덩어리를 찾아 나란히 틀(split)로 묶는다.
+
+    items: (노드들, 원본 상자) — 읽기 순서. 좌우로 나란한 것끼리 잇고(세로로 쌓인 것도 옆 덩어리를 거쳐 이어진다),
+    이어진 묶음 안에서 가로 범위가 겹치는 것끼리 한 단으로 모은다. 단 너비 비율은 원본 가로 폭, 간격은 원본 단 사이.
+    결과는 묶음 자리(첫 덩어리 위치)에 split 노드 하나를 둔다.
+    """
+    n = len(items)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = items[i][1], items[j][1]
+            if a and b and _beside(a, b):
+                parent[find(i)] = find(j)
+    comps: dict[int, list[int]] = defaultdict(list)
+    for i in range(n):
+        comps[find(i)].append(i)
+    out: list[tuple[list[dict], list | None]] = []
+    done: set[int] = set()
+    for i in range(n):
+        if i in done:
+            continue
+        members = comps[find(i)]
+        if len(members) < 2:
+            out.append(items[i])
+            continue
+        done.update(members)
+        # 단 나누기: 가로 범위가 겹치는 덩어리끼리 한 단
+        cols: list[dict] = []
+        for m in sorted(members, key=lambda k: items[k][1][0]):
+            bb = items[m][1]
+            col = next((c for c in cols if min(c["x1"], bb[2]) - max(c["x0"], bb[0]) > 2), None)
+            if col is None:
+                cols.append({"x0": bb[0], "x1": bb[2], "m": [m]})
+            else:
+                col["x0"], col["x1"] = min(col["x0"], bb[0]), max(col["x1"], bb[2])
+                col["m"].append(m)
+        cols.sort(key=lambda c: c["x0"])
+        gaps = [max(0.0, b["x0"] - a["x1"]) for a, b in zip(cols, cols[1:])]
+        content = []
+        for c in cols:
+            nodes = [nd for m in sorted(c["m"], key=lambda k: (items[k][1][1], k)) for nd in items[m][0]]
+            content.append({"type": "splitCol", "attrs": {"w": round(c["x1"] - c["x0"], 1)},
+                            "content": nodes or [_paragraph([])]})
+        split = {"type": "split", "attrs": {"gap": round(max(2.0, sum(gaps) / len(gaps)), 1) if gaps else 6},
+                 "content": content}
+        out.append(([split], _union(items[m][1] for m in members)))
+    return out
+
+
 def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
     blocks = list(doc.blocks)
     pages = {p.page_no: p for p in doc.pages}
@@ -385,21 +471,16 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
             if filled is None and paras:
                 stats["fallback"] += 1
         it = iter(filled) if filled is not None else None
-        floated: list[dict] = []
+        pieces: list[tuple[list[dict], list | None]] = []
         for c in children:
             if c.kind == "table":
-                beside = [p for p in paras if c.bbox and p.bbox and p.bbox[0] > c.bbox[2] - 2
-                          and p.bbox[1] < c.bbox[3] and p.bbox[3] > c.bbox[1]]
-                if beside and c.bbox[2] - c.bbox[0] < content_w * 0.6:
-                    # 표 오른쪽에 글이 나란히 놓인 배치(선수금 관리방법): 표를 왼쪽에 띄운다
-                    floated.append(tnode(c, {"float": "left", "widthPct": round((c.bbox[2] - c.bbox[0]) / content_w * 100, 1)}))
-                else:
-                    body.append(tnode(c))
+                pieces.append(([tnode(c)], c.bbox))
             elif c.kind in ("paragraph", "footer") and c.text:
                 nodes = next(it) if it is not None else _text_nodes(c.content.get("runs", []))
                 if nodes:
-                    body.append(_paragraph(nodes))
-        body = floated + body
+                    pieces.append(([_paragraph(nodes)], c.bbox))
+        # 좌우로 나란한 내용(표 | 설명 글, 두 단 유의사항, 카드)은 나란히 틀로 묶는다
+        body = [nd for nodes, _ in side_by_side(pieces) for nd in nodes]
         if seq not in occ:
             return head + body
         o, v, m = occ[seq]
@@ -414,15 +495,15 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
     def heading(level: int, text: str) -> dict:
         return {"type": "heading", "attrs": {"level": level}, "content": [{"type": "text", "text": text}]}
 
-    def two_columns(children: list[Block]) -> bool:
-        xs = [c.bbox[0] for c in children if c.kind == "paragraph" and c.bbox]
-        return sum(x > style["page_w"] * 0.4 for x in xs) >= 3 and sum(x < style["page_w"] * 0.2 for x in xs) >= 3
-
-    out: list[tuple[int, float, dict]] = []     # (쪽, 세로 위치, 노드)
+    out: list[tuple[int, float, dict, object]] = []     # (쪽, 세로 위치, 노드, 덩어리 id)
+    group_box: dict[object, list | None] = {}             # 덩어리(최상위 블록 + 하위)의 원본 상자
 
     def emit(b: Block, nodes: list[dict], y: float | None = None):
         y = y if y is not None else (b.bbox[1] if b.bbox else 1e9)
-        out.extend((b.page_no, y, n) for n in nodes)
+        gid = ("b", b.seq)
+        if b.kind != "footer":
+            group_box[gid] = _union([b.bbox] + [c.bbox for c in kids[b.seq] if c.kind != "figure"])
+        out.extend((b.page_no, y, n, gid) for n in nodes)
 
     for b in blocks:
         if b.parent_seq is not None:
@@ -434,9 +515,8 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
             if b.seq in occ:
                 emit(b, wrap(b.seq, head, kids[b.seq]), y)
             else:
-                body = [n for c in kids[b.seq] for n in wrap(c.seq, [], [c])]
-                if body and two_columns(kids[b.seq]):
-                    body = [{"type": "columns", "attrs": {"count": 2}, "content": body}]
+                pieces = [(wrap(c.seq, [], [c]), c.bbox) for c in kids[b.seq]]
+                body = [n for nodes, _ in side_by_side(pieces) for n in nodes]
                 emit(b, head + body, y)
         elif b.kind == "article":
             label = f"{b.label} ({b.title})" if b.title else (b.label or "")
@@ -487,9 +567,11 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         page = pages[pno]
         if len(fl) < 3:
             for f in fl:
+                gid = ("img", f.seq)
+                group_box[gid] = list(f.bbox)
                 out.append((pno, f.bbox[1], _paragraph([{"type": "image", "attrs": {
                     "src": f"/api/assets/{f.content['asset']}.png", "alt": f.content.get("caption") or "",
-                    "widthPt": round(f.bbox[2] - f.bbox[0], 1)}}])))
+                    "widthPt": round(f.bbox[2] - f.bbox[0], 1)}}]), gid))
             continue
         ux0, uy0 = min(f.bbox[0] for f in fl), min(f.bbox[1] for f in fl)
         ux1, uy1 = max(f.bbox[2] for f in fl), max(f.bbox[3] for f in fl)
@@ -507,7 +589,9 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         if width < content_w * 0.85:
             attrs.update({"float": "right" if (rect[0] + rect[2]) / 2 > page.width / 2 else "left",
                           "widthPct": round(width / content_w * 100, 1)})
-        out.append((pno, rect[1] - 14, gallery_node(page, fl, rect, style["body_pt"], **attrs)))
+        gid = ("gallery", pno)
+        group_box[gid] = list(rect)
+        out.append((pno, rect[1] - 14, gallery_node(page, fl, rect, style["body_pt"], **attrs), gid))
 
     # 본문 블록은 읽기 순서 그대로 두고, 사진 묶음만 세로 위치에 맞는 자리로 옮긴다
     body_nodes = [o for o in out if o[2]["type"] != "gallery"]
@@ -516,6 +600,38 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         if at is None:
             at = next((i for i, o in enumerate(body_nodes) if o[0] > g[0] or (o[0] == g[0] and o[1] >= 1e8)), len(body_nodes))
         body_nodes.insert(at, g)
+
+    # 최상위 덩어리끼리 좌우로 나란하면(왼쪽 본표 묶음 | 오른쪽 '비아젬 상품 정보' 묶음) 쪽마다 나란히 틀로 묶는다
+    regrouped: list[tuple[int, float, dict, object]] = []
+    i = 0
+    while i < len(body_nodes):
+        pno = body_nodes[i][0]
+        j = i
+        while j < len(body_nodes) and body_nodes[j][0] == pno:
+            j += 1
+        order: list[object] = []
+        nodes_of: dict[object, list[dict]] = defaultdict(list)
+        y_of: dict[object, float] = {}
+        for _, y, node, gid in body_nodes[i:j]:
+            if gid not in nodes_of:
+                order.append(gid)
+                y_of[gid] = y
+            nodes_of[gid].append(node)
+        pieces = [(nodes_of[g], group_box.get(g)) for g in order]
+        first_y = {id(nodes_of[g]): y_of[g] for g in order}
+        for n_i, (nodes, bb) in enumerate(side_by_side(pieces)):
+            if nodes and nodes[0]["type"] == "split":
+                y = bb[1] if bb else 0.0
+                for col in nodes[0]["content"]:      # 나란히 틀 안의 사진 묶음은 띄우지 않는다
+                    for nd in col["content"]:
+                        if nd["type"] == "gallery":
+                            nd["attrs"].pop("float", None)
+                            nd["attrs"].pop("widthPct", None)
+            else:
+                y = first_y.get(id(nodes), 0.0)
+            regrouped.extend((pno, y, nd, ("m", pno, n_i)) for nd in nodes)
+        i = j
+    body_nodes = regrouped
     if doc.doc_type == "terms":
         # 약관: 쪽마다 본문을 감싸는 틀, 섹션마다 패널 → 박스 부품으로 묶는다
         grouped: list[dict] = []
@@ -530,7 +646,7 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
                 cur = []
 
         sec = 0
-        for pno, y, node in body_nodes:
+        for pno, y, node, _gid in body_nodes:
             if node["type"] == "box":           # 꼬리말 등 이미 박스인 것은 그대로
                 close()
                 grouped.append(node)
@@ -546,5 +662,5 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         close()
         content = grouped
     else:
-        content = [n for _, _, n in body_nodes]
+        content = [n for _, _, n, _g in body_nodes]
     return {"type": "doc", "content": content or [_paragraph([])]}, stats, style

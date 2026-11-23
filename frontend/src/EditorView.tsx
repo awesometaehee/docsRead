@@ -12,6 +12,7 @@ import { applyHeaderStyle, columnPct, columnRatios, copyTableFormat, setColumnRa
 import type { TableFormat } from "./tableCommands";
 import { tip } from "./tips";
 import { installPrintLines } from "./printLines";
+import { addSplitCol, findSplit, insertSplit, removeSplitCol, setSplitColShare, setSplitGap, setSplitRatios, splitColShare, splitRatios, unwrapSplit } from "./splitLayout";
 import type { DocRow, ModuleDetail, ModuleRow, Variant } from "./types";
 
 interface DraftRow { id: number; title: string; doc_type: string; base_document_id: number | null; updated_at: string }
@@ -212,7 +213,7 @@ const SIZES = [4.8, 5.5, 6, 6.5, 7, 7.6, 8, 8.4, 9, 10, 11, 12, 14, 16, 18, 22];
 function G({ cap, children }: { cap: string; children: React.ReactNode }) {
   return <div className="tg" role="group" aria-label={cap}><span className="tg-cap">{cap}</span>{children}</div>;
 }
-const DANGER = new Set(["표 삭제", "박스 풀기", "그림 삭제"]);
+const DANGER = new Set(["표 삭제", "박스 풀기", "그림 삭제", "단 삭제"]);
 const PRIMARY = new Set(["표 넣기", "인쇄 · PDF"]);
 
 function Swatches({ label, colors, onPick }: { label: string; colors: string[]; onPick: (c: string | null) => void }) {
@@ -228,7 +229,7 @@ function Swatches({ label, colors, onPick }: { label: string; colors: string[]; 
 }
 
 /** 열 비율 한꺼번에 입력: "5, 5.6, 6.5, …" 처럼 열마다 숫자를 넣고 Enter(또는 칸을 벗어나면) 적용. 합은 100으로 맞춘다. */
-function RatioInput({ value, onApply }: { value: number[] | null; onApply: (nums: number[]) => void }) {
+function RatioInput({ value, onApply, label = "열 비율" }: { value: number[] | null; onApply: (nums: number[]) => void; label?: string }) {
   const shown = value ? value.join(", ") : "";
   const [text, setText] = useState(shown);
   const [editing, setEditing] = useState(false);
@@ -240,7 +241,7 @@ function RatioInput({ value, onApply }: { value: number[] | null; onApply: (nums
     else setText(shown);
   };
   return (
-    <label className="num ratio" {...tip("열 비율")}>열 비율
+    <label className="num ratio" {...tip(label)}>{label}
       <input value={text} style={{ width: 170 }} onFocus={() => setEditing(true)} onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); (e.target as HTMLInputElement).blur(); } if (e.key === "Escape") { setText(shown); setEditing(false); (e.target as HTMLInputElement).blur(); } }}
         onBlur={apply} />
@@ -353,6 +354,7 @@ function DraftEditor({ draft, onSaved }: { draft: Draft; onSaved: (row: DraftRow
   const inGallery = editor.isActive("gallery");
   const inFigure = editor.isActive("figure") || picked === "figure";
   const isImage = picked === "image";
+  const split = findSplit(editor.state);
   // 도구 버튼은 편집기로 포커스만 돌려준다(커서 위치로 화면을 굴리지 않음)
   const c = () => editor.chain().focus(null, { scrollIntoView: false });
   const A = (name: string) => editor.getAttributes(name);
@@ -498,6 +500,20 @@ function DraftEditor({ draft, onSaved }: { draft: Draft; onSaved: (row: DraftRow
               {btn("3단", inCols && A("columns").count === 3, () => setColumns(3))}
             </div>
             {inCols && btn("단 넘기기", false, () => insertColumnBreak(editor), "커서 뒤의 내용을 다음 단 맨 위로 보냅니다")}
+          </G>
+          <G cap="나란히">
+            {btn("나란히 놓기", !!split, () => insertSplit(editor), split ? "지금 단 오른쪽에 빈 단을 하나 더합니다" : "선택한 블록을 왼쪽 단에 두고 오른쪽에 빈 단을 만들어 좌우로 나란히 놓습니다")}
+            {split && (
+              <>
+                <Num label="단 너비 %" value={splitColShare(editor.state)} step={0.5} width={50} onSet={(v) => { if (v) setSplitColShare(editor, v); }} />
+                <RatioInput label="단 비율" value={splitRatios(editor.state)} onApply={(nums) => {
+                  if (!setSplitRatios(editor, nums)) setNote(`단 비율은 숫자 ${split.split.childCount}개를 쉼표로 구분해 넣으세요.`);
+                }} />
+                <Num label="단 간격" value={split.split.attrs.gap} step={0.5} width={42} onSet={(v) => setSplitGap(editor, v)} />
+                {btn("단 삭제", false, () => removeSplitCol(editor))}
+                {btn("나란히 풀기", false, () => unwrapSplit(editor))}
+              </>
+            )}
           </G>
           <G cap="문서">
             {btn("변수로 만들기", false, makeVariable, hasText ? "선택한 글자를 변수로 바꿉니다" : "먼저 글자를 선택하세요")}
