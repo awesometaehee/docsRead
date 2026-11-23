@@ -42,6 +42,11 @@ cd frontend && npm install && npm run build && cd ..
 uv run uvicorn docsread.api.main:app --port 8000   # http://127.0.0.1:8000
 ```
 
+화면에서 올리기: **문서** 탭 왼쪽의 **PDF 올리기**(여러 개 선택·끌어 놓기 가능). `POST /api/documents/upload?filename=…`
+(본문 = PDF 바이트, 100MB 이하)로 `docs/uploads/` 에 저장하고 곧바로 데이터화한다. 같은 내용은 다시 적재하지 않고,
+같은 이름·다른 내용은 `이름 (2).pdf` 로 따로 저장한다. 공통 모듈은 자동으로 다시 계산하지 않으므로
+목록 아래 **다시 계산** 버튼(`POST /api/module-rebuild`, 백그라운드)으로 반영한다.
+
 화면 개발 시에는 `cd frontend && npm run dev` (5173 포트, /api 는 8000 으로 프록시).
 
 ## 구성

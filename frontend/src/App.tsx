@@ -4,6 +4,8 @@ import BlockView from "./BlockView";
 import EditorView from "./EditorView";
 import ModuleView from "./ModuleView";
 import PageCanvas from "./PageCanvas";
+import UploadPanel from "./UploadPanel";
+import TooltipLayer from "./Tooltip";
 import type { Block, BlockModules, DocDetail, DocRow } from "./types";
 
 const TYPE_LABEL = { terms: "약관", brochure: "상품설명서" } as const;
@@ -29,6 +31,7 @@ export default function App() {
   const [editFrom, setEditFrom] = useState<number | null>(null);
   const [blockModules, setBlockModules] = useState<BlockModules>({});
   const [moduleId, setModuleId] = useState<number | null>(null);
+  const [reload, setReload] = useState(0);
   const openDoc = (id: number) => { setSel(id); setMode("docs"); };
   const openModule = (id: number) => { setModuleId(id); setMode("modules"); };
 
@@ -41,7 +44,7 @@ export default function App() {
       get<DocRow[]>(`/api/documents?${p}`).then(setDocs).catch((e) => setError(String(e)));
     }, 200);
     return () => clearTimeout(t);
-  }, [type, company, q]);
+  }, [type, company, q, reload]);
 
   useEffect(() => {
     if (sel === null) return;
@@ -65,6 +68,7 @@ export default function App() {
 
   return (
     <div className="shell">
+    <TooltipLayer />
     <nav className="noprint">
       <strong>docsRead</strong>
       <div className="seg">
@@ -91,6 +95,7 @@ export default function App() {
           </select>
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="파일명·본문 검색" aria-label="검색" />
         </div>
+        <UploadPanel onUploaded={() => setReload((n) => n + 1)} onOpenDoc={openDoc} />
         <ul>
           {docs.map((d) => (
             <li key={d.id} className={d.id === sel ? "on" : ""} onClick={() => setSel(d.id)}>

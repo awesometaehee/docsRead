@@ -1,18 +1,23 @@
 """조회 API. 실행: uv run uvicorn docsread.api.main:app --reload --port 8000"""
 from __future__ import annotations
 
+import hashlib
 import re
+import threading
+import unicodedata
 from pathlib import Path
 
 import pymupdf
 from datetime import datetime
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select
 
 from ..editor.convert import document_to_editor
+from ..ingest.pipeline import ingest_file
 from ..config import ASSET_DIR, DOCS_DIR, ROOT
 from ..db import (Asset, Block, Document, Draft, LayoutItem, Module, ModuleOccurrence, ModuleVariant, Page,
                   SessionLocal, init_db)
@@ -204,6 +209,112 @@ async def upload_asset(request: Request):
     return {"src": f"/api/assets/{sha}.png", "width": pix.width, "height": pix.height}
 
 
+MAX_PDF_BYTES = 100 * 1024 * 1024
+UPLOAD_DIR = DOCS_DIR / "uploads"
+_ingest_lock = threading.Lock()     # SQLite 는 쓰기 하나씩: 적재·모듈 계산을 직렬화
+# stale: 마지막 모듈 계산 뒤 새 문서가 들어옴(서버 재시작 시 False 로 시작)
+_rebuild = {"state": "idle", "started_at": None, "finished_at": None, "message": None, "stale": False}
+
+
+def _safe_pdf_name(name: str) -> str:
+    """경로 성분을 떼고 파일 이름에 쓸 수 없는 글자를 바꾼다. 확장자는 .pdf 로 맞춘다."""
+    name = unicodedata.normalize("NFC", name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(r'[<>:"|?*\x00-\x1f]', "_", name).strip(" .")
+    stem = re.sub(r"\.pdf$", "", name, flags=re.I)[:180] or "문서"
+    return f"{stem}.pdf"
+
+
+@app.post("/api/documents/upload")
+async def upload_document(request: Request, filename: str = Query(..., min_length=1, max_length=255)):
+    """PDF 한 건(요청 본문 = 파일 바이트)을 docs/uploads 에 저장하고 바로 데이터화한다.
+
+    - 같은 내용(해시 동일)이 이미 있으면 파일을 저장하지 않고 기존 문서를 돌려준다.
+    - 적재에 실패하면 이번에 저장한 파일을 지우고 오류를 그대로 알린다(조용히 넘기지 않음).
+    - 공통 모듈은 다시 계산하지 않는다. 필요할 때 POST /api/module-rebuild.
+    """
+    size = int(request.headers.get("content-length") or 0)
+    if size > MAX_PDF_BYTES:
+        raise HTTPException(413, f"PDF 는 {MAX_PDF_BYTES // 1024 // 1024}MB 이하만 올릴 수 있습니다")
+    raw = await request.body()
+    return await run_in_threadpool(_ingest_upload, raw, filename)
+
+
+def _ingest_upload(raw: bytes, filename: str) -> dict:
+    if not raw:
+        raise HTTPException(400, "빈 파일입니다")
+    if len(raw) > MAX_PDF_BYTES:
+        raise HTTPException(413, f"PDF 는 {MAX_PDF_BYTES // 1024 // 1024}MB 이하만 올릴 수 있습니다")
+    if not raw.lstrip()[:5].startswith(b"%PDF-"):
+        raise HTTPException(415, "PDF 파일만 올릴 수 있습니다")
+    try:
+        with pymupdf.open(stream=raw, filetype="pdf") as probe:
+            if probe.needs_pass:
+                raise HTTPException(415, "암호가 걸린 PDF 는 처리할 수 없습니다")
+            if len(probe) == 0:
+                raise HTTPException(415, "쪽이 없는 PDF 입니다")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(415, "PDF 를 열 수 없습니다(손상된 파일)")
+
+    sha = hashlib.sha256(raw).hexdigest()
+    name = _safe_pdf_name(filename)
+    with _ingest_lock, SessionLocal() as s:
+        existing = s.scalar(select(Document).where(Document.sha256 == sha))
+        if existing:
+            return {"status": "duplicate", "document": _doc_row(existing)}
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        ASSET_DIR.mkdir(parents=True, exist_ok=True)
+        path, n = UPLOAD_DIR / name, 1
+        while path.exists():          # 이름이 같고 내용이 다른 파일은 덮어쓰지 않는다
+            n += 1
+            path = UPLOAD_DIR / f"{name[:-4]} ({n}).pdf"
+        path.write_bytes(raw)
+        try:
+            with s.begin_nested():
+                result = ingest_file(s, path, DOCS_DIR, False, {})
+            s.commit()
+        except Exception as e:
+            s.rollback()
+            path.unlink(missing_ok=True)
+            raise HTTPException(422, f"데이터화 실패: {e!r}")
+        d = s.scalar(select(Document).where(Document.sha256 == sha))
+        if result != "ingested" or d is None:
+            raise HTTPException(500, f"적재 결과를 확인할 수 없습니다({result})")
+        _rebuild["stale"] = True
+        return {"status": "ingested", "document": _doc_row(d)}
+
+
+def _run_rebuild():
+    from ..modules.build import main as build_modules
+    try:
+        with _ingest_lock:
+            code = build_modules()
+        _rebuild.update(state="done" if code == 0 else "error",
+                        message=None if code == 0 else "대사 불일치(단위 수 ≠ 사용처 수). 서버 로그를 확인하세요",
+                        stale=False if code == 0 else _rebuild.get("stale", False))
+    except Exception as e:
+        _rebuild.update(state="error", message=repr(e))
+    finally:
+        _rebuild["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+@app.post("/api/module-rebuild")
+def rebuild_modules():
+    """공통 모듈을 전체 문서 기준으로 다시 계산한다(백그라운드). 편집 문서는 자체 JSON 이라 영향 없음."""
+    if _rebuild["state"] == "running":
+        return _rebuild
+    _rebuild.update(state="running", started_at=datetime.now().isoformat(timespec="seconds"),
+                    finished_at=None, message=None)
+    threading.Thread(target=_run_rebuild, name="module-rebuild", daemon=True).start()
+    return _rebuild
+
+
+@app.get("/api/module-rebuild")
+def rebuild_status():
+    return _rebuild
+
+
 def _draft_row(d: Draft) -> dict:
     return {"id": d.id, "title": d.title, "doc_type": d.doc_type, "base_document_id": d.base_document_id,
             "updated_at": d.updated_at.isoformat(timespec="seconds")}
@@ -227,8 +338,10 @@ def create_draft(payload: dict = Body(default={})):
                           {"type": "box", "attrs": {"border": True, "round": True, "pad": 7}, "content": [
                               {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "제목"}]},
                               {"type": "paragraph"}]}]},
-                      style={"body_pt": 8.4, "line_height": 1.14, "page_w": 595.3, "page_h": 841.9, "pad": 14.2,
-                             "doc_type": dtype})
+                      # 상품설명서는 본문(유의사항)이 작고 표 글자는 따로 키우는 구성이라 기본 글자를 작게 둔다
+                      style={"body_pt": 4.8 if dtype == "brochure" else 8.4,
+                             "line_height": 1.2 if dtype == "brochure" else 1.14,
+                             "page_w": 595.3, "page_h": 841.9, "pad": 14.2, "doc_type": dtype})
             stats = {}
         else:
             doc = _get_doc(s, int(doc_id))

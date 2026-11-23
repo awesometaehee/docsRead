@@ -1,4 +1,8 @@
 import { Extension, mergeAttributes, Node } from "@tiptap/core";
+import type { Editor } from "@tiptap/core";
+import { Fragment } from "@tiptap/pm/model";
+import { TextSelection } from "@tiptap/pm/state";
+import type { EditorState, Transaction } from "@tiptap/pm/state";
 import Paragraph from "@tiptap/extension-paragraph";
 import Color from "@tiptap/extension-color";
 import Image from "@tiptap/extension-image";
@@ -11,6 +15,13 @@ import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
 import TextStyle from "@tiptap/extension-text-style";
 import StarterKit from "@tiptap/starter-kit";
+import Blockquote from "@tiptap/extension-blockquote";
+import BulletList from "@tiptap/extension-bullet-list";
+import CodeBlock from "@tiptap/extension-code-block";
+import HorizontalRule from "@tiptap/extension-horizontal-rule";
+import OrderedList from "@tiptap/extension-ordered-list";
+import { BlockKeys, LayoutAttrs, PageBreak } from "./blockCommands";
+import { TableTools } from "./tableCommands";
 import type { JSONContent } from "@tiptap/core";
 import type { Part, Slot } from "./types";
 
@@ -97,6 +108,98 @@ const Columns = Node.create({
   renderHTML({ node }) { return ["div", { "data-columns": node.attrs.count, class: "cols", style: `column-count:${node.attrs.count}` }, 0]; },
 });
 
+/** 단 넘김: 단 안에서 이 뒤의 내용을 다음 단 맨 위로 보낸다(편집 화면에서만 점선으로 보임). */
+const ColumnBreak = Node.create({
+  name: "columnBreak",
+  group: "block",
+  atom: true,
+  selectable: true,
+  parseHTML() { return [{ tag: "hr[data-colbreak]", priority: 60 }]; },   // 일반 가로줄(hr)보다 먼저
+  renderHTML() { return ["hr", { "data-colbreak": "", class: "colbreak", title: "단 넘김" }]; },
+});
+
+/** 커서를 감싼 단(columns) 노드와 위치·깊이. */
+function findColumns(state: EditorState) {
+  const $f = state.selection.$from;
+  for (let d = $f.depth; d > 0; d--) {
+    if ($f.node(d).type.name === "columns") return { node: $f.node(d), pos: $f.before(d), depth: d };
+  }
+  return null;
+}
+
+/** 단 바로 아래 자식 중 단 넘김의 위치들(문서 기준). */
+function breakPositions(node: PMNode, pos: number): number[] {
+  const out: number[] = [];
+  node.forEach((child, offset) => { if (child.type.name === "columnBreak") out.push(pos + 1 + offset); });
+  return out;
+}
+
+/** 단 끝에 [단 넘김, 빈 문단]을 n 쌍 붙이고, 첫 빈 문단에 커서를 둔다. */
+function appendColumns(tr: Transaction, columnsPos: number, n: number) {
+  const { schema } = tr.doc.type;
+  const end = columnsPos + tr.doc.nodeAt(columnsPos)!.nodeSize - 1;
+  const nodes: PMNode[] = [];
+  for (let i = 0; i < n; i++) nodes.push(schema.nodes.columnBreak.create(), schema.nodes.paragraph.create());
+  tr.insert(end, Fragment.from(nodes));
+  tr.setSelection(TextSelection.create(tr.doc, end + 2));
+}
+
+/**
+ * 단 수 바꾸기. 새로 나누면 빈 단마다 빈 문단을 만들어 두 번째 단에 커서를 둔다.
+ * 원본에서 온 흐름형 단(단 넘김 없음)은 내용 흐름을 바꾸지 않고 단 수만 바꾼다.
+ */
+export function setColumnCount(editor: Editor, n: number) {
+  const { state, view } = editor;
+  const found = findColumns(state);
+  if (!found) {
+    if (n <= 1 || !editor.chain().focus().wrapIn("columns", { count: n }).run()) return;
+    const tr = editor.state.tr;
+    appendColumns(tr, findColumns(editor.state)!.pos, n - 1);
+    view.dispatch(tr.scrollIntoView());
+    return;
+  }
+  const tr = state.tr;
+  const breaks = breakPositions(found.node, found.pos);
+  if (n <= 1) {   // 1단: 단을 풀고 단 넘김은 버린다
+    const kids: PMNode[] = [];
+    found.node.forEach((child) => { if (child.type.name !== "columnBreak") kids.push(child); });
+    const from = state.selection.from;
+    tr.replaceWith(found.pos, found.pos + found.node.nodeSize, kids);
+    tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(tr.mapping.map(from), tr.doc.content.size))));
+  } else {
+    tr.setNodeMarkup(found.pos, undefined, { ...found.node.attrs, count: n });
+    if (breaks.length && breaks.length < n - 1) appendColumns(tr, found.pos, n - 1 - breaks.length);
+    else if (breaks.length > n - 1) {   // 남는 단 넘김은 뒤에서부터 지운다(내용은 유지)
+      breaks.slice(n - 1).reverse().forEach((p) => tr.delete(p, p + 1));
+    }
+  }
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
+}
+
+/** 커서 자리에서 다음 단으로 넘긴다. 문단 중간이면 문단을 나눠 뒷부분을 다음 단 맨 위로 보낸다. */
+export function insertColumnBreak(editor: Editor) {
+  const { state, view } = editor;
+  const found = findColumns(state);
+  if (!found) return;
+  const { $from } = state.selection;
+  const tr = state.tr;
+  const { schema } = state;
+  if ($from.parent.isTextblock && $from.depth === found.depth + 1) {
+    tr.deleteSelection();
+    const at = tr.selection.from;
+    tr.split(at);                                   // [앞 문단][뒤 문단]
+    tr.insert(at + 1, schema.nodes.columnBreak.create());
+    tr.setSelection(TextSelection.create(tr.doc, at + 3));
+  } else {   // 표·박스 안 등: 그 블록 뒤에서 넘긴다
+    const after = $from.after(found.depth + 1);
+    tr.insert(after, [schema.nodes.columnBreak.create(), schema.nodes.paragraph.create()]);
+    tr.setSelection(TextSelection.create(tr.doc, after + 2));
+  }
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
+}
+
 /** 박스(틀·패널): 테두리, 둥근 위 모서리, 배경색, 용지 끝까지 채우기. 안에 무엇이든 넣을 수 있다. */
 export const Box = Node.create({
   name: "box",
@@ -108,16 +211,21 @@ export const Box = Node.create({
     return {
       border: { default: true, ...hidden }, borderColor: { default: "#939598", ...hidden }, borderW: { default: 0.5, ...hidden },
       round: { default: false, ...hidden }, bg: { default: null, ...hidden }, pad: { default: 7, ...hidden }, bleed: { default: false, ...hidden },
+      margin: { default: null, ...hidden },   // 바깥 여백(pt). null 이면 용지 스타일 기본값
     };
   },
   parseHTML() { return [{ tag: "div[data-box]" }]; },
-  renderHTML({ node }) {
+  renderHTML({ node, HTMLAttributes }) {
     const a = node.attrs;
+    const m = typeof a.margin === "number" ? a.margin : null;
     const style = [
       a.border ? `border:${a.borderW}pt solid ${a.borderColor}` : "", a.bg ? `background:${a.bg}` : "",
       a.round ? "border-radius:13pt 13pt 0 0" : "", `--bp:${a.pad}pt`,
+      // 용지 끝까지 박스는 좌우를 용지 끝에 붙여야 하므로 위아래에만 적용
+      m === null ? "" : a.bleed ? `margin-top:${m}pt;margin-bottom:${m}pt` : `margin:${m}pt`,
     ].filter(Boolean).join(";");
-    return ["div", { "data-box": "", class: `box${a.bleed ? " bleed" : ""}${a.round ? " round" : ""}`, style }, 0];
+    // 공통 속성(쪽 아래 고정 등)도 함께 그린다
+    return ["div", mergeAttributes(HTMLAttributes, { "data-box": "", class: `box${a.bleed ? " bleed" : ""}${a.round ? " round" : ""}`, style }), 0];
   },
 });
 
@@ -292,13 +400,25 @@ const Tbl = Table.extend({
   },
 });
 
+/*
+ * 약관의 "1." "-" ">" "---" 는 본문 글자이므로 줄 맨 앞에서 쳐도 목록·인용·가로줄로 바꾸지 않는다.
+ * 노드는 그대로 두어 예전에 만든 문서도 열린다. 제목 단축(# / ## / ###)은 유지한다.
+ */
+const noRules = { addInputRules: () => [] };
+const PlainOrderedList = OrderedList.extend(noRules);
+const PlainBulletList = BulletList.extend(noRules);
+const PlainBlockquote = Blockquote.extend(noRules);
+const PlainCodeBlock = CodeBlock.extend(noRules);
+const PlainHorizontalRule = HorizontalRule.extend(noRules);
+
 export const extensions = [
-  StarterKit.configure({ heading: false, paragraph: false }),
+  StarterKit.configure({ heading: false, paragraph: false, orderedList: false, bulletList: false, blockquote: false, codeBlock: false, horizontalRule: false }),
+  PlainOrderedList, PlainBulletList, PlainBlockquote, PlainCodeBlock, PlainHorizontalRule, PageBreak, BlockKeys, LayoutAttrs, TableTools,
   Head.configure({ levels: [1, 2, 3] }), Para, TextStyle, Color, FontSize, Img,
   // 기본 정렬은 용지 스타일(본문 양쪽, 제목 가운데)에 맡기고, 직접 고른 정렬만 문단에 기록한다
   TextAlign.configure({ types: ["paragraph", "heading"], defaultAlignment: null as never }),
   Tbl.configure({ resizable: true, View: LookTableView as never, cellMinWidth: 8, lastColumnResizable: true }), Row, Cell, Header,
-  Variable, ModuleBlock, Columns, Region, Box, Figure, Gallery,
+  Variable, ModuleBlock, Columns, ColumnBreak, Region, Box, Figure, Gallery,
 ];
 
 /** 모듈 문안(템플릿)을 편집기 인라인 노드로 만든다. 변수는 기본값으로 채운다. */

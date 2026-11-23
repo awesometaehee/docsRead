@@ -106,11 +106,12 @@ main { overflow: auto; }
 
 /* 편집기 */
 button.primary { font: inherit; padding: 4px 12px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button.half { font: inherit; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
 button.wide { grid-column: 1 / -1; font: inherit; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
 aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background: #f7f8fa; }
 .link.danger { color: #b42318; }
 .edwrap { display: grid; grid-template-columns: minmax(0, 1fr) 320px; height: 100%; min-height: 0; }
-.edmain { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.edmain { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
 .edbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px 12px; background: #fff; border-bottom: 1px solid var(--line); }
 .edbar.tools .seg button { padding: 3px 9px; font-size: 12px; }
 .edtitle { flex: 1; min-width: 200px; font: inherit; font-size: 15px; font-weight: 500; border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; }
@@ -118,7 +119,8 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .save { font-size: 11px; color: var(--mute); }
 .save.dirty, .save.saving { color: #a8540a; }
 .save.error { color: #b42318; }
-.note { padding: 6px 12px; background: #fff6dd; border-bottom: 1px solid #f0c36d; font-size: 12px; cursor: pointer; }
+/* 알림은 화면 위에 띄운다(편집 화면을 밀지 않게). 누르면 닫힌다 */
+.note { position: absolute; left: 16px; bottom: 16px; z-index: 20; max-width: min(640px, 70%); padding: 8px 12px; background: #fff6dd; border: 1px solid #f0c36d; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.15); font-size: 12px; cursor: pointer; }
 .edscroll { flex: 1; overflow: auto; background: #e9ebef; padding: 16px; }
 /* 편집 용지: 원본과 같은 치수(pt)·글자 크기·줄 간격. 값은 문서에서 잰 것을 변수로 받는다 */
 .paper { background: #fff; width: var(--pw, 595.3pt); margin: 0 auto; padding: var(--pad, 14.2pt); box-shadow: 0 1px 4px rgba(0, 0, 0, .18);
@@ -128,7 +130,8 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .paper .ProseMirror { outline: none; min-height: calc(var(--ph, 841.9pt) - 2 * var(--pad, 14.2pt)); }
 .paper .ProseMirror::after { content: ""; display: block; clear: both; }
 .paper p { margin: 0; text-align: justify; word-break: break-all; }
-.paper p.hang { padding-left: 1.05em; text-indent: -1.05em; }
+/* 내어쓰기: 폭은 문단의 --hang(앞 기호의 실제 폭, em). 예전 문서(role=hang)는 1.05em */
+.paper p.hang { padding-left: var(--hang, 1.05em); text-indent: calc(-1 * var(--hang, 1.05em)); }
 .paper h1, .paper h2 { margin: 0; text-align: center; font-weight: 700; background: #dadbdc; overflow: hidden; clear: both; }
 .paper h1 { font-size: 12pt; line-height: 36pt; border-radius: 14pt 14pt 0 0; }
 .paper h2 { font-size: 10pt; line-height: 15pt; border-radius: 12pt 12pt 0 0; margin-top: 8pt; }
@@ -141,6 +144,12 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .paper .selectedCell { background: #e3ecff !important; }
 .paper .cols { column-gap: 8pt; }
 .paper .cols > * { break-inside: avoid; }
+/* 편집 안내선: 단 영역 전체 테두리 + 단 사이 구분선(배치에 영향 없음, 인쇄 시 숨김) */
+.paper .cols { outline: 1px dashed #9aa8c7; outline-offset: 2pt; column-rule: 1px dashed #9aa8c7; }
+.paper:not(.marks) .cols { outline: 0; column-rule: 0; }   /* 모듈·변수 표시를 끄면 인쇄 모습 그대로 */
+.paper hr.colbreak { break-after: column; height: 0; margin: 0; border: 0; }
+.paper hr.colbreak.ProseMirror-selectednode { border-top: 2px solid var(--accent); }
+@media print { .paper .cols { outline: 0; column-rule: 0; } .paper hr.colbreak { border: 0; } }
 .region { margin: 0; line-height: 0; }
 .region svg { display: block; width: 100%; height: auto; overflow: hidden; }
 .region.floated { margin: 8pt 0 0 4pt; }
@@ -175,7 +184,7 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .paper.brochure h1 { font-size: 10pt; line-height: 13pt; border-radius: 9pt 9pt 0 0; }
 .paper.brochure h2 { font-size: 10pt; line-height: 12.5pt; border-radius: 9pt 9pt 0 0; margin-top: 6pt; }
 .paper.brochure .ProseMirror > h2 ~ p, .paper.brochure .modblock > p, .paper.brochure .cols p { padding-left: 3.5pt; padding-right: 3.5pt; }
-.paper.brochure .ProseMirror > h2 ~ p.hang, .paper.brochure .modblock > p.hang, .paper.brochure .cols p.hang { padding-left: calc(3.5pt + 1.05em); }
+.paper.brochure .ProseMirror > h2 ~ p.hang, .paper.brochure .modblock > p.hang, .paper.brochure .cols p.hang { padding-left: calc(3.5pt + var(--hang, 1.05em)); }
 .paper.brochure td, .paper.brochure th { padding: 0 1pt; line-height: 1.15; }
 /* 모듈·변수 표시(끄면 원본과 같은 모습) */
 .var { cursor: pointer; }
@@ -237,3 +246,66 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .sw button { width: 15px; height: 15px; border: 1px solid #b9bec6; border-radius: 3px; padding: 0; cursor: pointer; }
 .sw button.none { background: #fff; color: var(--mute); line-height: 11px; font-size: 12px; }
 .sw input[type="color"] { width: 18px; height: 18px; border: 0; padding: 0; background: none; cursor: pointer; }
+.upload { padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.upload.drag { background: #eaf0ff; outline: 2px dashed var(--accent); outline-offset: -4px; }
+.upload-row { display: flex; align-items: center; gap: 8px; }
+.upload-row span { color: var(--mute); font-size: 11px; }
+.upload button:disabled { opacity: .5; cursor: default; }
+.upload-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 180px; overflow: auto; font-size: 11.5px; }
+.upload-list li { display: grid; grid-template-columns: auto 1fr; gap: 0 6px; padding: 3px 0; border: 0; cursor: default; }
+.upload-list li:hover { background: none; }
+.upload-list .st { font-weight: 600; color: var(--mute); }
+.upload-list .ok .st { color: #067647; }
+.upload-list .dup .st { color: #b54708; }
+.upload-list .fail .st { color: #b42318; }
+.upload-list .nm, .upload-list a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-list a { color: var(--accent); cursor: pointer; }
+.upload-list small { grid-column: 2; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-list .fail small { color: #b42318; white-space: normal; }
+.upload-list .clear { display: block; text-align: right; }
+.rebuild { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: #fffaeb; color: #93370d; font-size: 11.5px; }
+.rebuild.error { background: #fef3f2; color: #b42318; }
+.rebuild.running { background: #eaf0ff; color: var(--accent); }
+.rebuild span { flex: 1; }
+.rebuild button { font: inherit; padding: 2px 8px; border: 1px solid currentColor; border-radius: 6px; background: #fff; color: inherit; cursor: pointer; }
+/* 쪽 나눔: 편집 화면에서는 다음 쪽 경계까지 빈 공간(높이는 layoutPages 가 맞춤), 인쇄 시 쪽을 넘긴다 */
+.paper .pagebreak { position: relative; display: block; margin: 0; border-top: 1px dashed #c98b8b; }
+.paper .pagebreak::before { content: "쪽 나눔"; position: absolute; top: 2px; right: 0; font-size: 7pt; color: #c98b8b; background: #fff; padding: 0 3px; }
+.paper .pagebreak.ProseMirror-selectednode { border-top: 2px solid var(--accent); }
+.paper .pagebreak.ProseMirror-selectednode::before { color: var(--accent); }
+.pages { font-size: 12px; color: var(--mute); padding: 0 4px; white-space: nowrap; }
+.pages.over { color: #b42318; font-weight: 600; }
+@media print {
+  .paper .pagebreak { height: 0 !important; border: 0; break-after: page; }
+  .paper .pagebreak::before { display: none; }
+  .paper .pagebreak + * { margin-top: var(--pad, 14.2pt); }
+}
+/* 쪽 아래 고정: 고정 블록 덩어리 앞 빈 칸(높이는 layoutPages). 편집 표시를 켜면 빗금으로 보인다 */
+.paper .pin-spacer { display: block; height: 0; }
+.paper.marks .pin-spacer { background: repeating-linear-gradient(135deg, transparent 0 6px, #eef1f6 6px 7px); }
+.paper.marks .pin-bottom { box-shadow: -3px 0 0 #9aa8c7; }
+.paper .ProseMirror > .box.bleed.pin-bottom:last-child { margin-bottom: calc(-1 * var(--pad, 14.2pt)); }
+@media print { .paper .pin-spacer { background: none !important; } .paper .pin-bottom { box-shadow: none !important; } }
+/* 도구 모음: 줄 수·높이를 고정해 선택이 바뀌어도 편집 화면이 밀리지 않게 한다 */
+.edbar.tools:not(.ctx) { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+.edbar.tools:not(.ctx) > * { flex-shrink: 0; }
+.edbar.ctx { height: 72px; box-sizing: border-box; align-content: flex-start; overflow-y: auto; scrollbar-width: thin; }
+.ctxhint { color: var(--mute); font-size: 12px; align-self: center; }
+.edview { display: inline-flex; align-items: center; gap: 6px 8px; margin-left: auto; flex-wrap: nowrap; }
+.edview .seg button { padding: 3px 9px; font-size: 12px; }
+.edview select { font: inherit; font-size: 12px; border: 1px solid var(--line); border-radius: 7px; padding: 3px 4px; background: #fff; }
+/* 말풍선(도구 설명): 브라우저 기본 대신 직접 그린다 */
+.tip { position: fixed; z-index: 1000; max-width: 280px; padding: 8px 11px 9px; border-radius: 8px; background: #1f2328; color: #fff;
+  font-size: 12px; line-height: 1.5; box-shadow: 0 6px 20px rgba(15, 23, 42, .28); pointer-events: none;
+  opacity: 0; transform: translateY(-3px); transition: opacity .12s ease, transform .12s ease; }
+.tip.above { transform: translateY(3px); }
+.tip.on { opacity: 1; transform: none; }
+.tip::before { content: ""; position: absolute; left: calc(var(--arrow) - 5px); top: -5px; width: 10px; height: 10px; background: #1f2328; transform: rotate(45deg); border-radius: 2px; }
+.tip.above::before { top: auto; bottom: -5px; }
+.tip-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
+.tip-head b { font-weight: 600; font-size: 12.5px; }
+.tip-keys { margin-left: auto; display: inline-flex; gap: 3px; }
+.tip kbd { font: 600 10.5px/1 ui-monospace, SFMono-Regular, Consolas, monospace; padding: 3px 5px; border-radius: 4px; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.22); color: #e6edf3; }
+.tip p { margin: 0; color: #c9d1d9; }
+@media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
+@media print { .tip { display: none !important; } }
