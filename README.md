@@ -32,6 +32,32 @@
 - 이미지 올리기는 `POST /api/assets` (PNG 로 바꿔 `data/assets` 에 저장, 15MB 이하)
 - 편집 문서는 스스로 완결된 JSON 이라 모듈을 다시 계산해도 깨지지 않는다. 원본 문서 데이터는 바뀌지 않는다
 
+## 4단계: AI 변환(멀티모달 LLM)
+
+템플릿이 제각각인 문서를 위해, 쪽 이미지를 LLM 이 읽고 **정해진 규격의 JSON** 으로만 답하게 한 뒤 자체 코드로 편집기 문서를 만든다.
+
+`PDF 쪽 이미지(200dpi) → OpenAI (Structured Outputs 규격 강제 + few-shot + temperature 0) → 정형 JSON → to_editor.py → 편집 문서`
+
+- 규격: `backend/docsread/llm/schema.py` — 블록 종류(title·section·article_title·paragraph·notice·table·image·page_artifact)와
+  색(default·red·gray)·정렬이 열거형이라 모델이 태그·스타일을 지어낼 수 없다
+- 모양: `backend/docsread/llm/to_editor.py` 상단 상수(색 값·칸 배경 단계·안내 상자)가 정한다 → 같은 종류 문서는 같은 모양
+- 역할 나눔: LLM 은 '무엇인지'(제목·조·문단·표 구조·붉은 글·정렬·두 단), PDF 데이터화 결과는 '치수와 그림'
+  (글자가 90% 이상 맞는 PDF 표의 열 너비·칸 배경·괘선, 사진 묶음 배치·캡션, 꼬리말 로고·정보 줄·전화번호 띠).
+  PDF 표 인식이 틀린 경우(사진 영역까지 표로 잡음 등)에는 LLM 의 열 비율·배경 단계를 쓰고, 그 표에 묶였던 그림은 사진 묶음으로 돌린다
+- 도형으로 그린 꼬리말 로고는 PDF 에서 그 영역만 잘라 그림 자산으로 넣는다
+- few-shot: `data/llm_fewshot/<문서종류>_<이름>_p<쪽>.png` + `.json`(정답). 변환하는 문서와 같은 종류(terms|brochure)만 2쪽까지 보낸다.
+  검수된 편집 문서에서 만든다: `uv run python -m docsread.llm.fewshot <편집문서 id> <원본 문서 id> <이름>`
+  (쪽 나눔으로 원본 쪽과 짝짓고, 원본 글자와 97% 미만으로 맞으면 저장하지 않음)
+- 캐시: 쪽 결과는 `llm_pages` 에 저장되고, 모델·프롬프트·규격·few-shot 이 같으면 다시 보내지 않는다
+- 검증: 쪽마다 PDF 글자 레이어와 LLM 결과의 글자를 대조해 97% 미만이면 경고(빠뜨림·오독). 한 쪽이라도 실패하면 편집 문서를 만들지 않는다
+- 화면: 편집기 왼쪽 검색 결과의 **AI 변환**(키가 설정된 경우에만 보임). API: `POST /api/llm/convert {document_id}`, `GET /api/llm/jobs/{id}`
+
+설정: 프로젝트 루트 `.env`(`.env.example` 복사, git 제외) 또는 환경변수.
+`DOCSREAD_LLM_PROVIDER`(`gemini` | `openai` | `claude`), `DOCSREAD_LLM_MODEL`(예: `gemini-3.8-flash`, `claude-haiku-4-5`), 키 `GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`,
+`DOCSREAD_LLM_EFFORT`(Claude 생각 깊이, 기본 보내지 않음 — Haiku 4.5 는 받지 않음. Claude 에는 temperature 를 보내지 않음),
+`DOCSREAD_LLM_TEMPERATURE`(기본 0, 비우면 보내지 않음), `DOCSREAD_LLM_THINKING`(Gemini 생각 수준: 숫자=토큰 한도, 글자=low 등),
+`DOCSREAD_LLM_DPI`(기본 200). 쓸 수 있는 Gemini 모델 ID 확인: `uv run python -m docsread.llm.models flash`
+
 ## 실행
 
 ```bash
@@ -60,5 +86,7 @@ uv run uvicorn docsread.api.main:app --port 8000   # http://127.0.0.1:8000
 ## IT 검토가 필요한 지점
 
 - 패키지: PyMuPDF 는 AGPL 라이선스(사내 전용이면 통상 무방, 외부 제공 시 상용 라이선스 검토)
+- 외부 통신(AI 변환): 쪽 이미지가 고른 공급자(Google Gemini · OpenAI · Anthropic Claude) API 로 전송된다. 버튼을 누른 문서만 보내며, 키는 `.env`(git 제외) 또는 환경변수로 받는다(코드·DB 에 저장 안 함).
+  개인정보가 들어간 문서(청약서·가입 내역 등)는 보내지 않도록 운영 기준 필요. 패키지 `google-genai`, `openai`, `anthropic` 추가
 - 외부 통신: 화면이 Google Fonts(Noto Sans KR)를 불러온다. 폐쇄망이면 글꼴을 내부에 두도록 변경 필요
 - 저장 위치: 결과는 `data/` (SQLite 파일 + 이미지). 다중 사용자 운영 시 PostgreSQL 로 이전(`DOCSREAD_DB`)

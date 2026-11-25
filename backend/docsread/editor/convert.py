@@ -414,23 +414,8 @@ def side_by_side(items: list[tuple[list[dict], list | None]]) -> list[tuple[list
     return out
 
 
-def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
-    blocks = list(doc.blocks)
-    pages = {p.page_no: p for p in doc.pages}
-    style = page_style(doc, blocks)
-    content_w = style["page_w"] - 2 * PAD
-    kids: dict[int, list[Block]] = defaultdict(list)
-    for b in blocks:
-        if b.parent_seq is not None:
-            kids[b.parent_seq].append(b)
-    occ = {o.block_seq: (o, v, m) for o, v, m in session.execute(
-        select(ModuleOccurrence, ModuleVariant, Module)
-        .join(ModuleVariant, ModuleVariant.id == ModuleOccurrence.variant_id)
-        .join(Module, Module.id == ModuleVariant.module_id)
-        .where(ModuleOccurrence.document_id == doc.id))}
-    stats = {"modules": 0, "variables": 0, "fallback": 0}
-
-    # 페이지별 그림: 꼬리말 영역 / 표 안 / 사진 묶음(갤러리)
+def classify_figures(doc: Document, blocks: list[Block]):
+    """쪽별 그림 분류. 반환: (꼬리말 시작 y {쪽: y}, 표 안 그림 {표 seq: [그림]}, 사진 묶음 후보 {쪽: [그림 블록]})."""
     footer_top: dict[int, float] = {}
     for p in doc.pages:
         ys = [it.y0 for it in p.items if it.kind == "text" and it.y0 > p.height * 0.9
@@ -455,6 +440,176 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
                 in_table[host].append({"bbox": f.bbox, "asset": f.content["asset"]})
             else:
                 gallery[pno].append(f)
+    return footer_top, in_table, gallery
+
+
+def _raster_logo(pdf_path, page, top: float, band, avoid=()) -> dict | None:
+    """그림 파일이 아니라 도형·글자로 그린 로고: 회사 정보 줄 왼쪽 영역을 PDF 에서 잘라 그림 자산으로 만든다."""
+    import hashlib
+
+    import pymupdf
+
+    from ..config import ASSET_DIR
+    info = [it for it in page.items if it.kind == "text" and it.y0 > top
+            and re.search(r"대표이사|E-?mail", "".join(sp["t"] for sp in it.data["spans"]))]
+    if not info:
+        return None
+    x1 = min(it.x0 for it in info) - 3
+    y1 = band.y0 if band is not None else max(it.y1 for it in info) + 4
+    # 로고는 회사 정보 줄과 같은 높이 근처에 있다. 꼬리말 위 본문(표 등)이 섞이지 않게 세로 범위를 좁힌다
+    ly0 = min(it.y0 for it in info) - 22
+    def in_avoid(it):     # 꼬리말 가까이까지 내려온 본문 표(avoid) 안의 선·글자는 로고가 아니다
+        cx, cy = (it.x0 + it.x1) / 2, (it.y0 + it.y1) / 2
+        return any(a[0] - 1 <= cx <= a[2] + 1 and a[1] - 1 <= cy <= a[3] + 1 for a in avoid)
+
+    marks = [it for it in page.items if it.kind in ("path", "text") and it.y0 >= ly0 and it.y1 <= y1 + 1
+             and it.x1 <= x1 and it.x1 - it.x0 < x1 - PAD + 2 and not in_avoid(it)]
+    if x1 - PAD < 30 or not marks:
+        return None
+    rect = (min(it.x0 for it in marks) - 1, min(it.y0 for it in marks) - 1, x1, max(it.y1 for it in marks) + 1)
+    with pymupdf.open(pdf_path) as pdf:
+        png = pdf[page.page_no].get_pixmap(clip=pymupdf.Rect(*rect), dpi=300, alpha=True).tobytes("png")
+    sha = hashlib.sha256(png).hexdigest()
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    path = ASSET_DIR / f"{sha}.png"
+    if not path.exists():
+        path.write_bytes(png)
+    return {"src": f"/api/assets/{sha}.png", "x0": rect[0], "y0": rect[1], "x1": rect[2], "y1": rect[3]}
+
+
+def merge_band(paras: list[dict]) -> dict:
+    """여러 문단 → 가운데 정렬 한 문단. 사이는 앞 글자와 같은 서식의 넓은 공백으로 띄운다."""
+    content: list[dict] = []
+    for p in paras:
+        nodes = p.get("content") or []
+        if content and nodes:
+            gap = {"type": "text", "text": "\u2003\u2003"}
+            if nodes[0].get("marks"):
+                gap["marks"] = nodes[0]["marks"]
+            content.append(gap)
+        content.extend(nodes)
+    # 항목 사이 공백을 한 가지 간격으로: 공백만 든 조각·조각 앞뒤 공백을 모아, 두 칸 이상이거나 전화번호 뒤면 넓은 간격
+    GAP = "\u2003\u2003"      # 전각 공백 두 칸
+    out: list[dict] = []
+    pending, pending_marks = "", None
+
+    def push(text: str, marks):
+        node = {"type": "text", "text": text}
+        if marks:
+            node["marks"] = marks
+        out.append(node)
+
+    for n in content:
+        if n["type"] != "text":
+            out.append(n)
+            pending = ""
+            continue
+        t = n["text"]
+        core = t.strip()
+        if not core:
+            pending += t
+            pending_marks = pending_marks or n.get("marks")
+            continue
+        lead, trail = t[:len(t) - len(t.lstrip())], t[len(t.rstrip()):]
+        pending += lead
+        if pending and out:
+            prev = out[-1].get("text", "")
+            wide = len(pending) >= 2 or "\u2003" in pending or re.search(r"\d{3,4}-\d{4}$", prev)
+            push(GAP if wide else " ", pending_marks or n.get("marks"))
+        core = re.sub(r"\s{2,}", GAP, core)
+        core = re.sub(r"(\d{3,4}-\d{4}) (?=\S)", lambda m: m.group(1) + GAP, core)
+        push(core, n.get("marks"))
+        pending, pending_marks = trail, n.get("marks")
+    content = out
+    node = {"type": "paragraph", "attrs": {"textAlign": "center"}}
+    if content:
+        node["content"] = content
+    return node
+
+
+def footer_nodes(page, b: Block, top: float, pdf_path=None, avoid=()) -> list[dict]:
+    """꼬리말: 로고 + 회사 정보 줄, 전화번호 띠(배경색 박스). 모두 편집 가능한 글·그림으로 만든다.
+    pdf_path 를 주면 그림 파일이 없는 로고(도형으로 그린 것)도 잘라 넣는다."""
+    lines = _plain_paragraphs(b.content.get("runs", []))
+
+    def big(par):
+        return any((m.get("attrs") or {}).get("fontSize", 0) >= 11 for n in par.get("content", [])
+                   for m in n.get("marks", []) if m["type"] == "textStyle")
+
+    info = [l for l in lines if not big(l)]
+    phones = [l for l in lines if big(l)]
+    logos = sorted((it for it in page.items if it.kind == "image" and it.y1 > top + 4), key=lambda it: it.y0)
+    band = max((it for it in page.items if it.kind == "path" and it.data.get("fill") and it.y1 > top + 20
+                and it.data["fill"] != "#ffffff" and it.x1 - it.x0 > page.width * 0.5),
+               key=lambda it: (it.x1 - it.x0) * (it.y1 - it.y0), default=None)
+    nodes = []
+    if not logos and info and pdf_path is not None:
+        lg = _raster_logo(pdf_path, page, top, band, avoid)
+        if lg:
+            for l in info:
+                l.setdefault("attrs", {})["role"] = "logo"
+            info = [{"type": "figure", "attrs": {
+                "w": round(lg["x1"] - lg["x0"], 1), "h": round(lg["y1"] - lg["y0"], 1), "float": "left", "plain": True,
+                "images": [{"src": lg["src"], "x": 0, "y": 0, "w": round(lg["x1"] - lg["x0"], 1),
+                            "h": round(lg["y1"] - lg["y0"], 1)}]}}] + info
+    if logos and info:
+        # 로고는 여러 조각 그림이 세로로 이어진 것이라 한 장면(그림 부품)으로 묶고, 전화번호 띠 위까지만 보이게 한다
+        lx0, ly0 = min(it.x0 for it in logos), min(it.y0 for it in logos)
+        lx1, ly1 = max(it.x1 for it in logos), max(it.y1 for it in logos)
+        if band is not None:
+            ly1 = min(ly1, band.y0)
+        for l in info:
+            l.setdefault("attrs", {})["role"] = "logo"
+        info = [{"type": "figure", "attrs": {
+            "w": round(lx1 - lx0, 1), "h": round(ly1 - ly0, 1), "float": "left", "plain": True,
+            "images": [{"src": f"/api/assets/{it.data['asset']}.png", "x": round(it.x0 - lx0, 1), "y": round(it.y0 - ly0, 1),
+                        "w": round(it.x1 - it.x0, 1), "h": round(it.y1 - it.y0, 1)} for it in logos]}}] + info
+    if info:
+        nodes.append(box(info, border=False, bleed=True, pad=0))
+    if phones:
+        phones = [merge_band(phones)]       # 전화번호 띠는 원본처럼 한 줄(PDF 에서 따로 놓인 줄도 이어 붙인다)
+        nodes.append(box(phones, border=False, bleed=True, bg=band.data["fill"] if band else "#dadbdc", pad=0))
+    return nodes
+
+
+def gallery_for(page, fl: list[Block], content_w: float, body_pt: float) -> tuple[dict, tuple]:
+    """사진 3장 이상 묶음 → (gallery 노드, 원본 영역). 배경 패널이 있으면 그 범위·색을 쓰고, 좁으면 한쪽으로 띄운다."""
+    ux0, uy0 = min(f.bbox[0] for f in fl), min(f.bbox[1] for f in fl)
+    ux1, uy1 = max(f.bbox[2] for f in fl), max(f.bbox[3] for f in fl)
+    rect = (ux0 - 3, uy0 - 3, min(ux1 + 3, page.width - PAD), uy1 + 12)
+    panels = [it for it in page.items if it.kind == "path" and it.data.get("fill")
+              and it.x0 <= ux0 + 2 and it.y0 <= uy0 + 2 and it.x1 >= min(ux1, page.width - PAD) - 2 and it.y1 >= uy1 - 2
+              and (it.x1 - it.x0) * (it.y1 - it.y0) < page.width * page.height * 0.4]
+    attrs = {}
+    if panels:      # 사진들을 감싼 배경 패널이 있으면 그 범위와 배경색을 쓴다
+        pn = min(panels, key=lambda it: (it.x1 - it.x0) * (it.y1 - it.y0))
+        rect = (max(pn.x0, PAD), pn.y0, min(pn.x1, page.width - PAD), pn.y1)
+        if pn.data["fill"] != "#ffffff":
+            attrs["bg"] = pn.data["fill"]
+    width = rect[2] - rect[0]
+    if width < content_w * 0.85:
+        attrs.update({"float": "right" if (rect[0] + rect[2]) / 2 > page.width / 2 else "left",
+                      "widthPct": round(width / content_w * 100, 1)})
+    return gallery_node(page, fl, rect, body_pt, **attrs), rect
+
+
+def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
+    blocks = list(doc.blocks)
+    pages = {p.page_no: p for p in doc.pages}
+    style = page_style(doc, blocks)
+    content_w = style["page_w"] - 2 * PAD
+    kids: dict[int, list[Block]] = defaultdict(list)
+    for b in blocks:
+        if b.parent_seq is not None:
+            kids[b.parent_seq].append(b)
+    occ = {o.block_seq: (o, v, m) for o, v, m in session.execute(
+        select(ModuleOccurrence, ModuleVariant, Module)
+        .join(ModuleVariant, ModuleVariant.id == ModuleOccurrence.variant_id)
+        .join(Module, Module.id == ModuleVariant.module_id)
+        .where(ModuleOccurrence.document_id == doc.id))}
+    stats = {"modules": 0, "variables": 0, "fallback": 0}
+
+    footer_top, in_table, gallery = classify_figures(doc, blocks)
 
     def tnode(c: Block, attrs=None) -> dict:
         share = (c.bbox[2] - c.bbox[0]) / content_w if c.bbox else 1.0
@@ -526,40 +681,7 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         elif b.kind == "table":
             emit(b, [tnode(b)])
         elif b.kind == "footer" and b.page_no in footer_top:
-            # 꼬리말: 로고 + 회사 정보 줄, 전화번호 띠(배경색 박스). 모두 편집 가능한 글·그림으로 만든다
-            page = pages[b.page_no]
-            top = footer_top.pop(b.page_no)     # 쪽마다 한 번만
-            lines = _plain_paragraphs(b.content.get("runs", []))
-
-            def big(par):
-                return any((m.get("attrs") or {}).get("fontSize", 0) >= 11 for n in par.get("content", [])
-                           for m in n.get("marks", []) if m["type"] == "textStyle")
-
-            info = [l for l in lines if not big(l)]
-            phones = [l for l in lines if big(l)]
-            logos = sorted((it for it in page.items if it.kind == "image" and it.y1 > top + 4), key=lambda it: it.y0)
-            band = max((it for it in page.items if it.kind == "path" and it.data.get("fill") and it.y1 > top + 20
-                        and it.data["fill"] != "#ffffff" and it.x1 - it.x0 > page.width * 0.5),
-                       key=lambda it: (it.x1 - it.x0) * (it.y1 - it.y0), default=None)
-            nodes = []
-            if logos and info:
-                # 로고는 여러 조각 그림이 세로로 이어진 것이라 한 장면(그림 부품)으로 묶고, 전화번호 띠 위까지만 보이게 한다
-                lx0, ly0 = min(it.x0 for it in logos), min(it.y0 for it in logos)
-                lx1, ly1 = max(it.x1 for it in logos), max(it.y1 for it in logos)
-                if band is not None:
-                    ly1 = min(ly1, band.y0)
-                for l in info:
-                    l.setdefault("attrs", {})["role"] = "logo"
-                info = [{"type": "figure", "attrs": {
-                    "w": round(lx1 - lx0, 1), "h": round(ly1 - ly0, 1), "float": "left", "plain": True,
-                    "images": [{"src": f"/api/assets/{it.data['asset']}.png", "x": round(it.x0 - lx0, 1), "y": round(it.y0 - ly0, 1),
-                                "w": round(it.x1 - it.x0, 1), "h": round(it.y1 - it.y0, 1)} for it in logos]}}] + info
-            if info:
-                nodes.append(box(info, border=False, bleed=True, pad=0))
-            if phones:
-                for l in phones:
-                    l.setdefault("attrs", {})["textAlign"] = "center"
-                nodes.append(box(phones, border=False, bleed=True, bg=band.data["fill"] if band else "#dadbdc", pad=0))
+            nodes = footer_nodes(pages[b.page_no], b, footer_top.pop(b.page_no))     # 쪽마다 한 번만
             emit(b, nodes, 1e8)
 
     # 사진 묶음: 원본 위치의 세로 순서에 맞춰 끼워 넣는다. 옆에 글이 있으면 그쪽을 비워 띄운다.
@@ -573,25 +695,10 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
                     "src": f"/api/assets/{f.content['asset']}.png", "alt": f.content.get("caption") or "",
                     "widthPt": round(f.bbox[2] - f.bbox[0], 1)}}]), gid))
             continue
-        ux0, uy0 = min(f.bbox[0] for f in fl), min(f.bbox[1] for f in fl)
-        ux1, uy1 = max(f.bbox[2] for f in fl), max(f.bbox[3] for f in fl)
-        rect = (ux0 - 3, uy0 - 3, min(ux1 + 3, page.width - PAD), uy1 + 12)
-        panels = [it for it in page.items if it.kind == "path" and it.data.get("fill")
-                  and it.x0 <= ux0 + 2 and it.y0 <= uy0 + 2 and it.x1 >= min(ux1, page.width - PAD) - 2 and it.y1 >= uy1 - 2
-                  and (it.x1 - it.x0) * (it.y1 - it.y0) < page.width * page.height * 0.4]
-        attrs = {}
-        if panels:      # 사진들을 감싼 배경 패널이 있으면 그 범위와 배경색을 쓴다
-            pn = min(panels, key=lambda it: (it.x1 - it.x0) * (it.y1 - it.y0))
-            rect = (max(pn.x0, PAD), pn.y0, min(pn.x1, page.width - PAD), pn.y1)
-            if pn.data["fill"] != "#ffffff":
-                attrs["bg"] = pn.data["fill"]
-        width = rect[2] - rect[0]
-        if width < content_w * 0.85:
-            attrs.update({"float": "right" if (rect[0] + rect[2]) / 2 > page.width / 2 else "left",
-                          "widthPct": round(width / content_w * 100, 1)})
+        node, rect = gallery_for(page, fl, content_w, style["body_pt"])
         gid = ("gallery", pno)
         group_box[gid] = list(rect)
-        out.append((pno, rect[1] - 14, gallery_node(page, fl, rect, style["body_pt"], **attrs), gid))
+        out.append((pno, rect[1] - 14, node, gid))
 
     # 본문 블록은 읽기 순서 그대로 두고, 사진 묶음만 세로 위치에 맞는 자리로 옮긴다
     body_nodes = [o for o in out if o[2]["type"] != "gallery"]
@@ -641,7 +748,7 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
         def close():
             nonlocal cur
             if cur:
-                first = cur[0]["type"] == "heading" or _is_section(cur[0])
+                first = (cur[0]["type"] == "heading" and cur[0]["attrs"]["level"] <= 2) or _is_section(cur[0])   # 조 제목으로 시작하는 틀은 이어지는 틀
                 grouped.append(box(cur, border=True, round=first, pad=7))
                 cur = []
 

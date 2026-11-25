@@ -154,6 +154,22 @@ class Draft(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class LlmPage(Base):
+    """쪽 하나를 LLM 으로 읽은 결과(정형 JSON). 같은 모델·프롬프트 판이면 다시 부르지 않고 이 값을 쓴다."""
+    __tablename__ = "llm_pages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    page_no: Mapped[int] = mapped_column(Integer)
+    model: Mapped[str] = mapped_column(String(64))
+    prompt_version: Mapped[str] = mapped_column(String(16))
+    output: Mapped[dict] = mapped_column(JSON)
+    usage: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+Index("ix_llm_pages_key", LlmPage.document_id, LlmPage.page_no, LlmPage.model, LlmPage.prompt_version)
+
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 engine = create_engine(DB_URL, future=True)
 SessionLocal = sessionmaker(engine, expire_on_commit=False)

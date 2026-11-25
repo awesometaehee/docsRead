@@ -84,6 +84,43 @@ export function splitBox(editor: Editor): boolean {
   return true;
 }
 
+/** 쪽 배치가 요청한 자리(박스 안의 요소)에서 박스를 둘로 자른다. 뒤 박스는 이어지는 틀이라 둥근 머리를 두지 않는다. */
+export function splitBoxAtDom(editor: Editor, el: HTMLElement): boolean {
+  const { state, view } = editor;
+  let inside: number;
+  try { inside = view.posAtDOM(el, 0); } catch { return false; }
+  const $p = state.doc.resolve(Math.min(inside, state.doc.content.size));
+  let d = $p.depth;
+  while (d > 0 && $p.node(d).type.name !== "box") d--;
+  if (d <= 0) return false;
+  const idx = $p.index(d);
+  if (idx === 0) return false;
+  const pos = $p.posAtIndex(idx, d);
+  if (!canSplit(state.doc, pos, 1)) return false;
+  const box = $p.node(d);
+  const tr = state.tr.split(pos, 1, [{ type: box.type, attrs: { ...box.attrs, round: false, pin: null, cont: true } }]);
+  tr.setMeta("addToHistory", false);
+  view.dispatch(tr);
+  return true;
+}
+
+/** 쪽 배치가 자른 박스(cont)를 바로 앞 박스와 다시 합친다(더 넘길 필요가 없어졌을 때). */
+export function joinBoxAtDom(editor: Editor, el: HTMLElement): boolean {
+  const { state, view } = editor;
+  let inside: number;
+  try { inside = view.posAtDOM(el, 0); } catch { return false; }
+  const $p = state.doc.resolve(Math.min(inside, state.doc.content.size));
+  let d = $p.depth;
+  while (d > 0 && !($p.node(d).type.name === "box" && $p.node(d).attrs.cont)) d--;
+  if (d <= 0) return false;
+  const at = $p.before(d);
+  if (state.doc.resolve(at).nodeBefore?.type.name !== "box") return false;
+  const tr = state.tr.join(at);
+  tr.setMeta("addToHistory", false);
+  view.dispatch(tr);
+  return true;
+}
+
 /** 박스 바로 앞(사이에 쪽 나눔만 있어도 됨)의 박스와 하나로 합친다. */
 export function joinPrevBox(editor: Editor): boolean {
   const { state, view } = editor;
@@ -195,8 +232,14 @@ export const PageBreak = Node.create({
   group: "block",
   atom: true,
   selectable: true,
+  // soft: 원본 쪽 경계(AI 변환이 넣음). 앞 쪽 내용이 이미 다음 쪽으로 넘쳐 흘렀으면 새 쪽을 또 만들지 않는다
+  addAttributes() {
+    return { soft: { default: false, parseHTML: (el: HTMLElement) => el.hasAttribute("data-soft"), renderHTML: () => ({}) } };
+  },
   parseHTML() { return [{ tag: "div[data-pagebreak]" }]; },
-  renderHTML() { return ["div", { "data-pagebreak": "", class: "pagebreak" }]; },
+  renderHTML({ node }) {
+    return ["div", { "data-pagebreak": "", class: `pagebreak${node.attrs.soft ? " soft" : ""}`, ...(node.attrs.soft ? { "data-soft": "" } : {}) }];
+  },
 });
 
 /**
@@ -387,6 +430,58 @@ const pinSpacerPlugin = new Plugin({
   },
 });
 
+/**
+ * 통째로 넘기기: 조(제목 + 그 아래 내용)·표·서문(문서 제목 + 첫 조 앞 글)·모듈 블록이 쪽 경계에 걸리면
+ * 덩어리 앞의 빈 칸(위젯)을 키워 덩어리 전체를 다음 쪽 맨 위로 민다. 높이는 layoutPages 가 정한다.
+ * 표·단 나눔·나란히·그림 안쪽은 들여다보지 않는다(그 안에서는 밀지 않음).
+ */
+const KEEP_INSIDE_SKIP = new Set(["table", "columns", "split", "figure", "gallery", "region"]);
+const keepKey = new PluginKey("keepSpacer");
+const keepSpacerPlugin = new Plugin({
+  key: keepKey,
+  props: {
+    decorations(state) {
+      const decos: Decoration[] = [];
+      state.doc.descendants((node, pos) => {
+        const t = node.type.name;
+        // 쪽 아래 고정 박스(꼬리말)에는 두지 않는다: 고정 덩어리 배치(pin-spacer)가 바로 뒤 형제들을 잰다
+        if ((t === "heading" && node.attrs.level <= 3) || t === "table" || t === "moduleBlock" || (t === "box" && !node.attrs.pin)) {
+          // 박스 앞 빈 칸은 박스 첫머리의 덩어리를 넘길 때 박스째 넘기는 데 쓴다
+          decos.push(Decoration.widget(pos, () => {
+            const el = document.createElement("div");
+            el.className = t === "box" ? "keep-spacer box-spacer" : "keep-spacer";
+            el.contentEditable = "false";
+            return el;
+          }, { side: -1, key: `keep-${pos}`, ignoreSelection: true }));
+        }
+        return !KEEP_INSIDE_SKIP.has(t) && t !== "heading" && t !== "paragraph";
+      });
+      return DecorationSet.create(state.doc, decos);
+    },
+  },
+});
+
+/** 덩어리를 시작하는 요소(조 제목·장 제목·문서 제목·모듈 블록). 표는 덩어리 안에 포함되고, 혼자서도 덩어리가 된다. */
+const isGroupStart = (el: Element | null) => !!el && (/^H[1-3]$/.test(el.tagName) || el.classList.contains("modblock"));
+
+/** 빈 칸 뒤의 덩어리(같은 부모 안의 형제 요소들). */
+function keepUnit(spacer: HTMLElement): HTMLElement[] {
+  const first = spacer.nextElementSibling as HTMLElement | null;
+  if (!first) return [];
+  const unit = [first];
+  if (!isGroupStart(first)) return unit;           // 표 하나
+  if (first.classList.contains("modblock")) return unit;
+  for (let el = first.nextElementSibling as HTMLElement | null; el; el = el.nextElementSibling as HTMLElement | null) {
+    if (el.classList.contains("pagebreak") || el.classList.contains("pin-spacer") || el.classList.contains("pin-bottom")) break;
+    if (el.classList.contains("keep-spacer")) {
+      if (isGroupStart(el.nextElementSibling)) break;   // 다음 조
+      continue;                                          // 조 안의 표: 함께 넘긴다
+    }
+    unit.push(el);
+  }
+  return unit;
+}
+
 /** 문단 내어쓰기(hang, em)와 쪽 아래 고정(pin) 속성. */
 export const LayoutAttrs = Extension.create({
   name: "layoutAttrs",
@@ -404,10 +499,18 @@ export const LayoutAttrs = Extension.create({
       } } },
     ];
   },
-  addProseMirrorPlugins() { return [pinSpacerPlugin]; },
+  addProseMirrorPlugins() { return [pinSpacerPlugin, keepSpacerPlugin]; },
 });
 
-export interface PageInfo { pages: number; overflow: number[] }
+export interface PageInfo { pages: number; overflow: number[]; split?: HTMLElement; join?: HTMLElement }
+
+/** 빈 칸 앞에 (다른 빈 칸 말고) 형제 요소가 없는가 = 부모의 첫 내용인가. */
+function firstInParent(el: HTMLElement): boolean {
+  for (let p = el.previousElementSibling; p; p = p.previousElementSibling) {
+    if (!p.classList.contains("keep-spacer") && !p.classList.contains("pin-spacer")) return false;
+  }
+  return true;
+}
 
 /**
  * 편집 화면의 쪽 배치: 각 쪽 나눔의 높이를 '다음 쪽 경계 + 위 여백'까지로 맞추고,
@@ -426,9 +529,41 @@ export function layoutPages(paper: HTMLElement | null): PageInfo {
   const overflow: number[] = [];
   const TOL = 4;   // 화면 px 반올림 오차 허용
   let page = 0;
+  let split: HTMLElement | undefined;
   // 쪽 나눔과 고정 블록 앞 빈 칸을 문서 순서대로 맞춘다(앞의 높이가 뒤의 위치를 바꾸므로)
-  paper.querySelectorAll<HTMLElement>(".pagebreak, .pin-spacer").forEach((el) => {
+  paper.querySelectorAll<HTMLElement>(".pagebreak, .pin-spacer, .keep-spacer").forEach((el) => {
     el.style.height = "0px";
+    if (el.classList.contains("keep-spacer")) {
+      if (el.classList.contains("box-spacer")) return;   // 박스 첫머리 덩어리가 대신 정한다
+      const unit = keepUnit(el);
+      if (!unit.length) return;
+      // 박스 첫머리의 덩어리는 박스째 넘긴다(바깥 박스의 첫머리면 바깥 박스째)
+      let target = el;
+      let box: HTMLElement | null = null;
+      for (let cur: HTMLElement = el; firstInParent(cur) && cur.parentElement?.classList.contains("box"); ) {
+        box = cur.parentElement;
+        const before = box.previousElementSibling as HTMLElement | null;
+        if (!before?.classList.contains("box-spacer")) break;
+        target = before;
+        cur = before;
+      }
+      const lead = target === el ? unit[0] : (target.nextElementSibling as HTMLElement);
+      const top = lead.getBoundingClientRect().top - rect().top;
+      const bottom = Math.max(...unit.map((u) => u.getBoundingClientRect().bottom)) - rect().top;
+      const k = Math.floor(top / pagePx);
+      const limit = (k + 1) * pagePx - padPx;           // 이 쪽 글 영역의 아래 끝
+      const atTop = top <= k * pagePx + padPx + TOL;      // 이미 쪽 맨 위면 밀어도 소용없다
+      // 한 쪽에 다 들어가는 덩어리만 민다(더 크면 어차피 나뉘므로 그대로 둔다)
+      if (bottom > limit + TOL && !atTop && bottom - top <= pagePx - 2 * padPx) {
+        if (target === el && el.parentElement?.classList.contains("box")) {
+          // 박스 중간의 덩어리: 박스 테두리가 쪽을 건너가지 않도록 그 자리에서 박스를 자르게 한다(다음 배치에서 박스째 넘김)
+          split = split ?? unit[0];
+          return;
+        }
+        target.style.height = `${((k + 1) * pagePx + padPx - top) / scale}px`;
+      }
+      return;
+    }
     if (el.classList.contains("pin-spacer")) {
       let last = el.nextElementSibling as HTMLElement | null;
       if (!last) return;
@@ -446,6 +581,12 @@ export function layoutPages(paper: HTMLElement | null): PageInfo {
       return;
     }
     const y = el.getBoundingClientRect().top - rect().top;
+    if (el.classList.contains("soft")) {
+      // 원본 쪽 경계: 앞 내용이 이미 다음 쪽으로 흘러 넘쳤으면 쪽을 또 넘기지 않고 이어 흐른다
+      const spilled = y > (page + 1) * pagePx + TOL;
+      el.classList.toggle("soft-off", spilled);
+      if (spilled) { overflow.push(page + 1); page = Math.floor(y / pagePx); return; }   // 원본 쪽이 한 쪽에 안 들어감
+    }
     if (y > (page + 1) * pagePx + TOL) overflow.push(page + 1);   // 이 쪽 내용이 한 쪽을 넘침
     const pagesUsed = Math.max(page + 1, Math.ceil((y - TOL) / pagePx));
     const next = pagesUsed * pagePx + padPx;
@@ -456,7 +597,15 @@ export function layoutPages(paper: HTMLElement | null): PageInfo {
   // 용지 높이(아래 여백 포함)로 센다. 용지 끝까지 띠는 아래 여백을 덮으므로 내용 끝 + 여백으로 세면 한 쪽이 더 나온다
   const end = rect().height;
   const pages = Math.max(page + 1, Math.ceil((end - TOL) / pagePx));
-  return { pages, overflow: [...new Set(overflow)].sort((a, b) => a - b) };
+  // 원본 쪽 경계가 있는 문서(AI 변환)는 마지막 원본 쪽도 한 쪽에 들어가야 한다
+  if (paper.querySelector(".pagebreak.soft") && pages > page + 1) overflow.push(page + 1);
+  // 쪽 배치가 잘랐던 박스 중 이제 넘기지 않는 것(앞 빈 칸 0, 바로 앞이 박스)은 앞 박스와 다시 합친다
+  const join = split ? undefined : [...paper.querySelectorAll<HTMLElement>(".box.cont")].find((b) => {
+    const sp = b.previousElementSibling as HTMLElement | null;
+    if (!sp?.classList.contains("box-spacer") || parseFloat(sp.style.height) > 0) return false;
+    return !!sp.previousElementSibling?.classList.contains("box");
+  });
+  return { pages, overflow: [...new Set(overflow)].sort((a, b) => a - b), split, join };
 }
 
 /* ---------- 키 동작 ---------- */

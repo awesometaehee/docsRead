@@ -213,6 +213,7 @@ export const Box = Node.create({
       border: { default: true, ...hidden }, borderColor: { default: "#939598", ...hidden }, borderW: { default: 0.5, ...hidden },
       round: { default: false, ...hidden }, bg: { default: null, ...hidden }, pad: { default: 7, ...hidden }, bleed: { default: false, ...hidden },
       margin: { default: null, ...hidden },   // 바깥 여백(pt). null 이면 용지 스타일 기본값
+      cont: { default: false, ...hidden },    // 쪽 배치가 자른 뒤쪽 박스(더 넘길 필요가 없어지면 앞 박스와 다시 합친다)
     };
   },
   parseHTML() { return [{ tag: "div[data-box]" }]; },
@@ -226,7 +227,7 @@ export const Box = Node.create({
       m === null ? "" : a.bleed ? `margin-top:${m}pt;margin-bottom:${m}pt` : `margin:${m}pt`,
     ].filter(Boolean).join(";");
     // 공통 속성(쪽 아래 고정 등)도 함께 그린다
-    return ["div", mergeAttributes(HTMLAttributes, { "data-box": "", class: `box${a.bleed ? " bleed" : ""}${a.round ? " round" : ""}`, style }), 0];
+    return ["div", mergeAttributes(HTMLAttributes, { "data-box": "", class: `box${a.bleed ? " bleed" : ""}${a.round ? " round" : ""}${a.cont ? " cont" : ""}`, style }), 0];
   },
 });
 
