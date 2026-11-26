@@ -690,6 +690,8 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
   const [draft, setDraft] = useState<Draft | null>(null);
   const [q, setQ] = useState("");
   const [docs, setDocs] = useState<DocRow[]>([]);
+  const [kind, setKind] = useState<"" | "terms" | "brochure">("");
+  const [more, setMore] = useState(0);      // 목록에 다 못 보여 준 검색 결과 수
   const [busy, setBusy] = useState(false);
   const [confirmDel, setConfirmDel] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -702,10 +704,20 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
   const reload = useCallback(() => get<DraftRow[]>("/api/drafts").then(setDrafts).catch((e) => setError(String(e))), []);
   useEffect(() => { reload(); }, [reload]);
   useEffect(() => {
-    if (!q.trim()) { setDocs([]); return; }
-    const t = setTimeout(() => get<DocRow[]>(`/api/documents?q=${encodeURIComponent(q.trim())}`).then((r) => setDocs(r.slice(0, 15))).catch((e) => setError(String(e))), 250);
+    if (!q.trim()) { setDocs([]); setMore(0); return; }
+    const word = q.trim();
+    const t = setTimeout(() => get<DocRow[]>(`/api/documents?q=${encodeURIComponent(word)}${kind ? `&doc_type=${kind}` : ""}`).then((r) => {
+      // 서버는 종류순(상품설명서 → 약관)으로 주므로 앞에서 자르면 약관이 밀려난다.
+      // 이름이 맞는 문서를 본문만 맞는 문서보다 앞에 두고, 종류를 가리지 않았으면 약관·상품설명서를 반씩 보여 준다.
+      const named = (d: DocRow) => ((d.product ?? "") + d.filename).includes(word) ? 0 : 1;
+      const ranked = [...r].sort((a, b) => named(a) - named(b));
+      const pick = kind ? ranked.slice(0, 16)
+        : [...ranked.filter((d) => d.doc_type === "terms").slice(0, 8), ...ranked.filter((d) => d.doc_type === "brochure").slice(0, 8)];
+      setDocs(pick);
+      setMore(r.length - pick.length);
+    }).catch((e) => setError(String(e))), 250);
     return () => clearTimeout(t);
-  }, [q]);
+  }, [q, kind]);
 
   const create = useCallback(async (documentId: number | null, docType: "terms" | "brochure" = "terms") => {
     setBusy(true);
@@ -758,6 +770,11 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
       <aside className="noprint">
         <div className="filters">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="기준 문서 검색 → 복제해서 시작" aria-label="기준 문서 검색" />
+          <select className="wide" value={kind} onChange={(e) => setKind(e.target.value as "" | "terms" | "brochure")} aria-label="검색할 문서 종류">
+            <option value="">약관 + 상품설명서</option>
+            <option value="terms">약관만</option>
+            <option value="brochure">상품설명서만</option>
+          </select>
           <button className="half" disabled={busy} onClick={() => create(null, "terms")} {...tip("빈 약관", "약관 용지(본문 8.4pt)로 빈 문서를 만듭니다.", "빈 약관으로 시작")}>빈 약관</button>
           <button className="half" disabled={busy} onClick={() => create(null, "brochure")} {...tip("빈 상품설명서", "상품설명서 용지(본문 4.8pt, 작은 제목 띠, 좁은 표 칸)로 빈 문서를 만듭니다.", "빈 상품설명서로 시작")}>빈 상품설명서</button>
         </div>
@@ -773,6 +790,7 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
               </div>
             </li>
           ))}
+          {more > 0 && <li className="sep">검색 결과 {more}건이 더 있습니다. 검색어를 더 자세히 쓰거나 종류를 고르세요.</li>}
           {docs.length > 0 && <li className="sep">편집 문서</li>}
           {drafts.map((d) => (
             <li key={d.id} className={d.id === draft?.id ? "on" : ""} onClick={() => open(d.id)}>

@@ -425,3 +425,5 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .paper .split > .splitcol > :first-child { margin-top: 0; }
 .paper.marks .split > .splitcol { outline: 1px dashed #c5cfe6; outline-offset: -1px; }
 @media print { .paper .split > .splitcol { outline: 0 !important; } }
+
+.filters select.wide { grid-column: 1 / -1; }
