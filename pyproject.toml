@@ -15,6 +15,10 @@ dependencies = [
     "anthropic>=2.14.0",
 ]
 
+[project.optional-dependencies]
+# 시험용: Docling(IBM, MIT) 로컬 레이아웃·표 인식. 설치: uv sync --extra docling
+docling = ["docling>=2.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
