@@ -205,13 +205,45 @@ def extract_page(doc: pymupdf.Document, page: pymupdf.Page, asset_dir: Path, img
                         break
             ln.table = ti
             hit += 1
+        # 본표 바로 아래의 사진 묶음(격자 모양 패널)이 본표와 한 표로 붙어 잡힌 경우: 사진이 시작하는 행에서 표를 끊는다.
+        # 끊긴 아래쪽 글줄은 표에서 풀려 섹션 제목·문단·사진 캡션으로 다시 읽힌다
+        pics = [im["bbox"] for im in pd.images
+                if im["bbox"][2] - im["bbox"][0] > 12 and im["bbox"][3] - im["bbox"][1] > 12
+                and t.bbox[0] - 2 <= (im["bbox"][0] + im["bbox"][2]) / 2 <= t.bbox[2] + 2
+                and t.bbox[1] - 2 <= (im["bbox"][1] + im["bbox"][3]) / 2 <= t.bbox[3] + 2]
+        if len(pics) >= 4:
+            top, bottom = min(b[1] for b in pics), max(b[3] for b in pics)
+            # 사진 그림 상자는 투명 여백 때문에 본표 끝과 조금 겹치기도 한다.
+            # 사진 위쪽 근처에서 '어느 칸도 걸치지 않는' 첫 행 경계를 끊는 자리로 삼는다
+            cut = next((i for i in range(2, len(t.ys) - 1)
+                        if top - 16 <= t.ys[i] <= top + 25 and not any(c.r < i < c.r + c.rs for c in t.cells)), None)
+            if cut is not None:
+                y_cut = t.ys[cut]
+                band_h = t.ys[-1] - y_cut
+                pic_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in pics)
+                # 끊긴 아래쪽이 정말 사진 묶음인가: 사진이 그 높이의 대부분에 걸쳐 있고 넓이도 충분해야 한다
+                # (상품 사진 몇 장이 든 표는 사진이 일부 행에만 있어 여기서 걸러진다)
+                if band_h > 0 and bottom - max(top, y_cut) >= band_h * 0.6 and pic_area >= (t.bbox[2] - t.bbox[0]) * band_h * 0.12:
+                    t.cells = [c for c in t.cells if c.r < cut]
+                    t.ys = t.ys[:cut + 1]
+                    t.bbox = (t.bbox[0], t.bbox[1], t.bbox[2], y_cut)
+                    for ln in pd.lines:
+                        if ln.table == ti and (ln.bbox[1] + ln.bbox[3]) / 2 > y_cut:
+                            ln.table = None
         filled = sum(1 for c in t.cells if c.lines)
         inside = sum(1 for im in pd.images
                      if im["bbox"][2] - im["bbox"][0] > 12 and im["bbox"][3] - im["bbox"][1] > 12
                      and t.bbox[0] - 2 <= (im["bbox"][0] + im["bbox"][2]) / 2 <= t.bbox[2] + 2
                      and t.bbox[1] - 2 <= (im["bbox"][1] + im["bbox"][3]) / 2 <= t.bbox[3] + 2)
-        # 글자가 거의 없는 격자(장식)나 사진이 글칸만큼 많은 격자(사진 갤러리)는 표가 아니다
-        if filled < 2 or inside >= filled * 0.8:
+        # 사진이 차지하는 넓이: 사진 묶음은 칸 대부분이 사진이고, 사진이 든 표(상품 사진 몇 장)는 넓이가 작다
+        t_area = max(1.0, (t.bbox[2] - t.bbox[0]) * (t.bbox[3] - t.bbox[1]))
+        img_area = sum((im["bbox"][2] - im["bbox"][0]) * (im["bbox"][3] - im["bbox"][1]) for im in pd.images
+                       if im["bbox"][2] - im["bbox"][0] > 12 and im["bbox"][3] - im["bbox"][1] > 12
+                       and t.bbox[0] - 2 <= (im["bbox"][0] + im["bbox"][2]) / 2 <= t.bbox[2] + 2
+                       and t.bbox[1] - 2 <= (im["bbox"][1] + im["bbox"][3]) / 2 <= t.bbox[3] + 2)
+        # 글자가 거의 없는 격자(장식)나 사진 묶음(사진이 글칸만큼 많거나, 4장 이상이 넓이의 20% 이상)은 표가 아니다.
+        # 사진 묶음 옆의 안내 글까지 한 격자로 잡히면 글이 칸마다 쪼개지므로 표로 두지 않는다
+        if filled < 2 or inside >= filled * 0.8 or (inside >= 4 and img_area >= t_area * 0.2):
             for ln in pd.lines:
                 if ln.table == ti:
                     ln.table = None

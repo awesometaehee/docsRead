@@ -650,6 +650,33 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
     def heading(level: int, text: str) -> dict:
         return {"type": "heading", "attrs": {"level": level}, "content": [{"type": "text", "text": text}]}
 
+    # 사진 묶음과 그 안의 안내 글("※ 아래 이미지는 …")을 먼저 정한다.
+    # 안내 글은 읽기 순서상 옆 섹션('장례 상품 정보')의 문단으로 들어와 있는데, 그대로 두면 섹션의 가로 범위가
+    # 사진 묶음과 겹쳐 '왼쪽 글 | 오른쪽 사진' 나란히 배치를 알아보지 못한다. 그래서 사진 묶음 쪽으로 옮긴다.
+    gal: dict[int, tuple[dict, tuple, tuple]] = {}      # 쪽 → (gallery 노드, 원본 영역, 사진들만의 범위)
+    for pno, fl in gallery.items():
+        if len(fl) >= 3:
+            node, rect = gallery_for(pages[pno], fl, content_w, style["body_pt"])
+            gal[pno] = (node, rect, (min(f.bbox[0] for f in fl), min(f.bbox[1] for f in fl),
+                                     max(f.bbox[2] for f in fl), max(f.bbox[3] for f in fl)))
+    gal_notes: dict[int, list[Block]] = defaultdict(list)
+
+    def in_gallery(c: Block) -> bool:
+        g = gal.get(c.page_no)
+        if g is None or c.kind != "paragraph" or not c.bbox:
+            return False
+        ub = g[2]
+        cy = (c.bbox[1] + c.bbox[3]) / 2
+        return c.bbox[0] >= ub[0] - 6 and c.bbox[2] <= ub[2] + 12 and ub[1] - 16 <= cy <= ub[3] + 24
+
+    for b in blocks:
+        if b.kind in ("title", "section") and b.parent_seq is None:
+            moved = [c for c in kids[b.seq] if in_gallery(c)]
+            if moved:
+                kids[b.seq] = [c for c in kids[b.seq] if c not in moved]
+                for c in moved:
+                    gal_notes[c.page_no].append(c)
+
     out: list[tuple[int, float, dict, object]] = []     # (쪽, 세로 위치, 노드, 덩어리 id)
     group_box: dict[object, list | None] = {}             # 덩어리(최상위 블록 + 하위)의 원본 상자
 
@@ -677,7 +704,10 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
             label = f"{b.label} ({b.title})" if b.title else (b.label or "")
             emit(b, wrap(b.seq, [heading(3, label)], kids[b.seq], strip_heading=True))
         elif b.kind == "paragraph":
-            emit(b, wrap(b.seq, [], [b]))
+            if in_gallery(b):
+                gal_notes[b.page_no].append(b)
+            else:
+                emit(b, wrap(b.seq, [], [b]))
         elif b.kind == "table":
             emit(b, [tnode(b)])
         elif b.kind == "footer" and b.page_no in footer_top:
@@ -695,18 +725,32 @@ def document_to_editor(session, doc: Document) -> tuple[dict, dict, dict]:
                     "src": f"/api/assets/{f.content['asset']}.png", "alt": f.content.get("caption") or "",
                     "widthPt": round(f.bbox[2] - f.bbox[0], 1)}}]), gid))
             continue
-        node, rect = gallery_for(page, fl, content_w, style["body_pt"])
+        node, rect, ub = gal[pno]
         gid = ("gallery", pno)
-        group_box[gid] = list(rect)
-        out.append((pno, rect[1] - 14, node, gid))
+        notes = sorted(gal_notes.get(pno, []), key=lambda c: c.bbox[1])
+        # 덩어리 상자는 사진들의 범위 + 안내 글(배경 패널은 옆 글까지 덮는 경우가 있어 쓰지 않는다)
+        group_box[gid] = _union([[ub[0] - 3, ub[1] - 3, ub[2] + 3, ub[3] + 12]] + [c.bbox for c in notes])
+        y = rect[1] - 14
+        for c in notes:
+            if c.bbox[1] < ub[1]:
+                out.extend((pno, y, n, gid) for n in wrap(c.seq, [], [c]))
+        out.append((pno, y, node, gid))
+        for c in notes:
+            if c.bbox[1] >= ub[1]:
+                out.extend((pno, y, n, gid) for n in wrap(c.seq, [], [c]))
 
-    # 본문 블록은 읽기 순서 그대로 두고, 사진 묶음만 세로 위치에 맞는 자리로 옮긴다
-    body_nodes = [o for o in out if o[2]["type"] != "gallery"]
-    for g in (o for o in out if o[2]["type"] == "gallery"):
+    # 본문 블록은 읽기 순서 그대로 두고, 사진 묶음(과 그 안내 글)만 세로 위치에 맞는 자리로 옮긴다
+    def is_gallery(o) -> bool:
+        return isinstance(o[3], tuple) and o[3][0] == "gallery"
+
+    body_nodes = [o for o in out if not is_gallery(o)]
+    for gid in dict.fromkeys(o[3] for o in out if is_gallery(o)):
+        group = [o for o in out if o[3] == gid]
+        g = group[0]
         at = next((i for i, o in enumerate(body_nodes) if o[0] == g[0] and o[1] >= g[1] and o[1] < 1e8), None)
         if at is None:
             at = next((i for i, o in enumerate(body_nodes) if o[0] > g[0] or (o[0] == g[0] and o[1] >= 1e8)), len(body_nodes))
-        body_nodes.insert(at, g)
+        body_nodes[at:at] = group
 
     # 최상위 덩어리끼리 좌우로 나란하면(왼쪽 본표 묶음 | 오른쪽 '비아젬 상품 정보' 묶음) 쪽마다 나란히 틀로 묶는다
     regrouped: list[tuple[int, float, dict, object]] = []

@@ -58,6 +58,17 @@
 `DOCSREAD_LLM_TEMPERATURE`(기본 0, 비우면 보내지 않음), `DOCSREAD_LLM_THINKING`(Gemini 생각 수준: 숫자=토큰 한도, 글자=low 등),
 `DOCSREAD_LLM_DPI`(기본 200). 쓸 수 있는 Gemini 모델 ID 확인: `uv run python -m docsread.llm.models flash`
 
+## 원본 PDF 직접 수정용 글꼴 (시험 단계)
+
+상품설명서는 다시 조판하지 않고 원본 PDF 의 글자만 바꿔 넣는 방식을 시험 중이다.
+PDF 안의 글꼴은 쓰인 글자 조각뿐이라 새 글자를 쓸 수 없으므로, 공개 글꼴을 따로 받아 둔다.
+
+- 본고딕(Source Han Sans KR, SIL OFL) 6종을 `data/fonts/` 에 받는다:
+  `github.com/adobe-fonts/source-han-sans` 의 `SubsetOTF/KR/SourceHanSansKR-{Light,Normal,Regular,Medium,Bold,Heavy}.otf`
+- `uv run python -m docsread.pdfedit.fonts` 로 TrueType 사본(`data/fonts/ttf/`)을 만든다.
+  받은 OTF 를 그대로 쓰면 PDF 라이브러리(MuPDF)가 글자 번호를 잘못 적어 한글이 다른 글자로 찍힌다
+- 글자를 지울 때는 글줄 가운데의 얇은 띠만 지운다(글자 상자 전체로 지우면 위아래 줄이 함께 지워진다)
+
 ## 실행
 
 ```bash
