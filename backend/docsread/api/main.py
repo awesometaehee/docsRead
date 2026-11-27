@@ -394,51 +394,6 @@ def delete_draft(draft_id: int):
         return {"deleted": draft_id}
 
 
-@app.get("/api/llm/status")
-def llm_status():
-    """AI 변환을 쓸 수 있는가(키 설정 여부만 알린다. 키 값은 내보내지 않는다)."""
-    from ..llm import extract
-    return {"configured": extract.configured(), "provider": extract.PROVIDER, "model": extract.MODEL, "effort": extract.EFFORT or None, "temperature": extract.TEMPERATURE, "temperature_rejected": extract.TEMPERATURE_REJECTED,
-            "dpi": extract.DPI}
-
-
-@app.post("/api/llm/convert")
-def llm_convert(payload: dict = Body(...)):
-    """문서 쪽 이미지를 LLM 으로 정형 JSON 화한 뒤 편집 문서를 만든다(백그라운드). 쪽 이미지가 OpenAI 로 전송된다."""
-    from ..llm import extract, job
-    if not extract.configured():
-        key = {"gemini": "GEMINI_API_KEY", "claude": "ANTHROPIC_API_KEY"}.get(extract.PROVIDER, "OPENAI_API_KEY")
-        raise HTTPException(503, f"{key} 가 설정되지 않았습니다(.env)")
-    try:
-        return job.start(int(payload["document_id"]), force=bool(payload.get("force")))
-    except (KeyError, ValueError):
-        raise HTTPException(422, "document_id 가 필요합니다")
-    except LookupError as e:
-        raise HTTPException(404, str(e))
-
-
-@app.get("/api/llm/jobs/{job_id}")
-def llm_job(job_id: str):
-    from ..llm import job
-    j = job.status(job_id)
-    if j is None:
-        raise HTTPException(404, "작업을 찾을 수 없습니다(서버가 다시 시작됐을 수 있음)")
-    return j
-
-
-@app.get("/api/documents/{doc_id}/pages/{page_no}/llm")
-def llm_page(doc_id: int, page_no: int):
-    """쪽의 최근 LLM 결과(정형 JSON). 규격·few-shot 점검용."""
-    from ..db import LlmPage
-    with SessionLocal() as s:
-        row = s.scalar(select(LlmPage).where(LlmPage.document_id == doc_id, LlmPage.page_no == page_no)
-                       .order_by(LlmPage.id.desc()))
-        if row is None:
-            raise HTTPException(404, "이 쪽의 AI 변환 결과가 없습니다")
-        return {"model": row.model, "prompt_version": row.prompt_version, "usage": row.usage,
-                "created_at": row.created_at.isoformat(timespec="seconds"), "output": row.output}
-
-
 _dist = ROOT / "frontend" / "dist"
 if _dist.exists():   # 빌드된 화면이 있으면 같은 서버에서 제공
     app.mount("/", StaticFiles(directory=_dist, html=True), name="web")

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get } from "./api";
 import { extensions, insertColumnBreak, partsToInline, setColumnCount } from "./editorExtensions";
 import { addLineNear, autoHangAll, clearTextStyleAttr, fitImage, setImageAttrs, canJoinPrevBox, canMoveIntoPrevBox, canPin, hangOf, insertPageBreak, isPinned, joinPrevBox,
-  layoutPages, splitBoxAtDom, joinBoxAtDom, liftOutOfBox, moveIntoPrevBox, setHang, splitBox, togglePin, toggleHang, unwrapBox } from "./blockCommands";
+  layoutPages, liftOutOfBox, moveIntoPrevBox, setHang, splitBox, togglePin, toggleHang, unwrapBox } from "./blockCommands";
 import type { PageInfo } from "./blockCommands";
 import { applyHeaderStyle, columnPct, columnRatios, copyTableFormat, setColumnRatios, equalizeColumns, insertTable, pasteTableFormat, rowHeightOf, setColumnPct,
   setRowHeight } from "./tableCommands";
@@ -16,24 +16,14 @@ import { addSplitCol, findSplit, insertSplit, removeSplitCol, setSplitColShare, 
 import type { DocRow, ModuleDetail, ModuleRow, Variant } from "./types";
 
 interface DraftRow { id: number; title: string; doc_type: string; base_document_id: number | null; updated_at: string }
-interface PaperStyle { body_pt?: number; line_height?: number; page_w?: number; page_h?: number; pad?: number;
-  autofit?: boolean; base_pt?: number }   // autofit: 원본 쪽마다 한 쪽에 들어가도록 본문 크기·줄 간격을 자동으로 줄인다(AI 변환)
+interface PaperStyle { body_pt?: number; line_height?: number; page_w?: number; page_h?: number; pad?: number }
 interface Draft extends DraftRow { content: JSONContent; style: PaperStyle }
 interface VarInfo { name: string; value: string; count: number; mixed: boolean; options: string[] }
 
 async function send<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  if (!res.ok) {
-    const detail = await res.json().then((j) => (typeof j?.detail === "string" ? j.detail : null)).catch(() => null);
-    throw new Error(detail ?? `${res.status} ${res.statusText} — ${url}`);
-  }
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${url}`);
   return res.json() as Promise<T>;
-}
-
-interface LlmStatus { configured: boolean; model: string }
-interface LlmJob {
-  id: string; document_id: number; state: "running" | "done" | "error"; total: number; done: number; cached: number;
-  tokens: { input: number; output: number }; draft_id: number | null; warnings: string[]; message: string | null;
 }
 
 /* ---------- 편집 동작 ---------- */
@@ -343,26 +333,12 @@ function DraftEditor({ draft, onSaved }: { draft: Draft; onSaved: (row: DraftRow
   }, [note]);
   // 쪽 배치: 내용·배율·용지가 바뀔 때마다 쪽 나눔 높이를 다시 맞추고 넘친 쪽을 찾는다(글꼴 로딩 뒤에도 한 번 더)
   useEffect(() => {
-    const run = (fit: boolean) => {
+    const run = () => {
       const info = layoutPages(scrollRef.current?.querySelector<HTMLElement>(".paper") ?? null);
-      // 쪽 경계에 걸려 넘길 덩어리가 박스 중간에 있으면 박스를 잘라 테두리가 쪽을 건너가지 않게 한다(바뀌면 다시 배치됨)
-      if (info.split && editor && splitBoxAtDom(editor, info.split)) return;
-      if (info.join && editor && joinBoxAtDom(editor, info.join)) return;
       setPageInfo((cur) => (cur.pages === info.pages && cur.overflow.join() === info.overflow.join() ? cur : info));
-      // 원본 쪽 맞춤(강제): 넘친 쪽이 있으면 본문 크기·줄 간격을 한 단계씩 줄인다. 원본 크기의 85%·줄 간격 1.05 가 한도
-      const p = paperRef.current;
-      if (!fit || !p.autofit || !info.overflow.length) return;
-      const body = p.body_pt ?? 8.4, lh = p.line_height ?? 1.2, floor = (p.base_pt ?? body) * 0.85;
-      const nextLh = Math.max(1.05, Math.round((lh - 0.01) * 100) / 100);
-      const nextBody = Math.max(floor, Math.round(body * 0.98 * 100) / 100);
-      if (nextLh === lh && nextBody >= body) return;    // 한도까지 줄여도 넘치면 그대로 두고 넘침으로 알린다
-      setPaper({ ...p, body_pt: nextBody, line_height: nextLh });
-      setStatus("dirty");
-      clearTimeout(timer.current);
-      timer.current = setTimeout(() => { if (editor) save(editor, title); }, 1200);
     };
-    const raf = requestAnimationFrame(() => run(false));
-    const late = setTimeout(() => run(true), 600);   // 글꼴이 다 그려진 뒤에 잰다
+    const raf = requestAnimationFrame(run);
+    const late = setTimeout(run, 600);
     return () => { cancelAnimationFrame(raf); clearTimeout(late); };
   }, [tick, zoom, paper, editor]);
 
@@ -695,11 +671,6 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
   const [busy, setBusy] = useState(false);
   const [confirmDel, setConfirmDel] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [llm, setLlm] = useState<LlmStatus | null>(null);
-  const [job, setJob] = useState<LlmJob | null>(null);
-  const [report, setReport] = useState<LlmJob | null>(null);
-
-  useEffect(() => { get<LlmStatus>("/api/llm/status").then(setLlm).catch(() => setLlm(null)); }, []);
 
   const reload = useCallback(() => get<DraftRow[]>("/api/drafts").then(setDrafts).catch((e) => setError(String(e))), []);
   useEffect(() => { reload(); }, [reload]);
@@ -734,26 +705,6 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
     if (startFrom !== null) { onStarted(); create(startFrom); }
   }, [startFrom, onStarted, create]);
 
-  // AI 변환: 쪽 이미지 → LLM(규격 강제) → 정형 JSON → 편집 문서. 끝날 때까지 진행 상황을 묻는다
-  const convertLlm = useCallback(async (documentId: number) => {
-    setReport(null);
-    try {
-      let j = await send<LlmJob>("POST", "/api/llm/convert", { document_id: documentId });
-      setJob(j);
-      setQ("");
-      while (j.state === "running") {
-        await new Promise((r) => setTimeout(r, 1500));
-        j = await get<LlmJob>(`/api/llm/jobs/${j.id}`);
-        setJob(j);
-      }
-      if (j.state === "error") throw new Error(`AI 변환 실패: ${j.message}`);
-      setReport(j);
-      await reload();
-      if (j.draft_id !== null) setDraft(await get<Draft>(`/api/drafts/${j.draft_id}`));
-    } catch (e) { setError(String(e)); }
-    setJob(null);
-  }, [reload]);
-
   const open = (id: number) => get<Draft>(`/api/drafts/${id}`).then(setDraft).catch((e) => setError(String(e)));
   const remove = async (id: number) => {
     try {
@@ -782,12 +733,7 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
           {docs.map((d) => (
             <li key={`doc${d.id}`} onClick={() => !busy && create(d.id)}>
               <div className="line1"><span className={`badge ${d.doc_type}`}>{d.doc_type === "terms" ? "약관" : "상품설명서"}</span><b>{d.product}</b></div>
-              <div className="line2">{d.company} · {d.form_no} · 복제해서 편집 시작
-                {llm?.configured && (
-                  <> · <button className="link" disabled={busy || job !== null} onClick={(e) => { e.stopPropagation(); convertLlm(d.id); }}
-                    {...tip("AI 변환", `쪽 이미지를 ${llm.model} 에 보내 정해진 규격(JSON)으로 읽은 뒤 편집 문서를 만듭니다. 한 번 읽은 쪽은 저장해 두고 다시 보내지 않습니다.`, "AI 변환으로 편집 시작")}>AI 변환</button></>
-                )}
-              </div>
+              <div className="line2">{d.company} · {d.form_no} · 복제해서 편집 시작</div>
             </li>
           ))}
           {more > 0 && <li className="sep">검색 결과 {more}건이 더 있습니다. 검색어를 더 자세히 쓰거나 종류를 고르세요.</li>}
@@ -809,13 +755,6 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
       <main>
         {error && <div className="error" onClick={() => setError(null)}>{error}</div>}
         {busy && <div className="loading">문서를 편집용으로 변환하는 중…</div>}
-        {job && <div className="loading">AI 변환 중… {job.done}/{job.total}쪽{job.cached ? ` (저장된 결과 ${job.cached}쪽 재사용)` : ""}</div>}
-        {report && report.warnings.length > 0 && (
-          <div className="error" onClick={() => setReport(null)} title="눌러서 닫기">
-            AI 변환 결과 확인 필요
-            <ul>{report.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
-          </div>
-        )}
         {!draft && !busy && (
           <div className="empty">
             <h2>편집기</h2>
@@ -823,7 +762,7 @@ export default function EditorView({ startFrom, onStarted }: { startFrom: number
             <p>복제한 문서에서는 조·항목이 모듈 블록으로, 문서마다 달라지는 부분이 노란 변수로 들어옵니다. 원본 데이터는 바뀌지 않습니다.</p>
           </div>
         )}
-        {draft && !busy && !job && <DraftEditor key={draft.id} draft={draft} onSaved={onSaved} />}
+        {draft && !busy && <DraftEditor key={draft.id} draft={draft} onSaved={onSaved} />}
       </main>
     </>
   );

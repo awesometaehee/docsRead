@@ -10,9 +10,6 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "scikit-learn>=1.9.1",
-    "openai>=1.60",
-    "google-genai>=1.0",
-    "anthropic>=2.14.0",
     "fonttools>=4.69.1",
 ]
 

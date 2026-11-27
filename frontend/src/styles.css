@@ -160,20 +160,13 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .region.ProseMirror-selectednode { outline: 2px solid var(--accent); }
 /* 박스(틀·패널) */
 .paper .box { margin: 0; overflow: hidden; --bp: 7pt; padding-bottom: 4pt; }
-.paper .box + .box, .paper .box + .keep-spacer + .box { margin-top: 8pt; }
+.paper .box + .box { margin-top: 8pt; }
 .paper .box.bleed { margin-left: calc(-1 * var(--pad, 14.2pt)); margin-right: calc(-1 * var(--pad, 14.2pt)); padding: 3pt var(--pad, 14.2pt); clear: both; }
 .paper .box > :not(h1, h2, .modblock, .box), .paper .box > .modblock > :not(h1, h2) { margin-left: var(--bp); margin-right: var(--bp); }
 .paper .box > h1, .paper .box > h2, .paper .box > .modblock > h2 { margin-top: 0; border-radius: 0; }
 .paper .box > h1 + *, .paper .box > h2 + *, .paper .box > .modblock > h2 + * { margin-top: 3pt; }
-/* 통째로 넘기기 빈 칸(.keep-spacer)이 사이에 끼어도 위 간격 규칙이 그대로 걸리게 */
-.paper .box > h1 + .keep-spacer + *, .paper .box > h2 + .keep-spacer + * { margin-top: 3pt; }
-.paper .box > .keep-spacer:first-child + :not(h1, h2, .modblock) { margin-top: 4pt; }
 .paper .box > :first-child:not(h1, h2, .modblock) { margin-top: 4pt; }
 .paper p.logo { white-space: nowrap; text-align: left; padding-top: 20pt; }
-/* 꼬리말 법인 정보: 로고(왼쪽) | 회사 정보 줄(오른쪽)을 한 줄에 나란히, 세로 가운데 맞춤 */
-.paper .box:has(> .fig.plain + p.logo) { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8pt; align-items: center; }
-.paper .box:has(> .fig.plain + p.logo) > .fig.plain { float: none !important; grid-row: 1 / span 9; margin: 0; }
-.paper .box:has(> .fig.plain + p.logo) > p.logo { grid-column: 2; padding-top: 0; margin: 0; }
 /* 꼬리말 전화번호 띠: 줄바꿈 없이 한 줄 */
 .paper .ProseMirror > .box.bleed > p[style*="text-align: center"] { white-space: nowrap; }
 /* 사진 묶음과 캡션 그림 */
@@ -294,18 +287,10 @@ aside li.sep { cursor: default; color: var(--mute); font-size: 11px; background:
 .paper .pagebreak.ProseMirror-selectednode::before { color: var(--accent); }
 .pages { font-size: 12px; color: var(--mute); padding: 0 4px; white-space: nowrap; }
 .pages.over { color: #b42318; font-weight: 600; }
-.paper .pagebreak.soft { border-top-style: dotted; }
-.paper .pagebreak.soft::before { content: "원본 쪽 경계"; }
-.paper .pagebreak.soft-off { border-top-color: transparent; }
-.paper .pagebreak.soft-off::before { content: "원본 쪽 경계(앞 쪽이 넘쳐 이어 흐름)"; opacity: .6; }
-/* 통째로 넘기기: 조·표·서문 앞 빈 칸(높이는 layoutPages) */
-.paper .keep-spacer { display: block; height: 0; margin: 0 !important; }
 @media print {
   .paper .pagebreak { height: 0 !important; border: 0; break-after: page; }
   .paper .pagebreak::before { display: none; }
-  .paper .pagebreak + *, .paper .pagebreak + .keep-spacer + * { margin-top: var(--pad, 14.2pt); }
-  .paper .pagebreak.soft-off { break-after: auto; }
-  .paper .pagebreak.soft-off + *, .paper .pagebreak.soft-off + .keep-spacer + * { margin-top: 0; }
+  .paper .pagebreak + * { margin-top: var(--pad, 14.2pt); }
 }
 /* 쪽 아래 고정: 고정 블록 덩어리 앞 빈 칸(높이는 layoutPages). 편집 표시를 켜면 빗금으로 보인다 */
 .paper .pin-spacer { display: block; height: 0; }
