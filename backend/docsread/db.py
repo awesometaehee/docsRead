@@ -154,6 +154,20 @@ class Draft(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class PdfEdit(Base):
+    """원본 PDF 쪽 위에서 고친 내용. 원본은 그대로 두고 고친 목록(edits)만 저장해, 볼 때마다 원본에 다시 입힌다.
+
+    edits: [{"page", "span", "text", "was", "align"} | {"page", "image", "asset"}] — pdfedit/engine.py 참고
+    """
+    __tablename__ = "pdf_edits"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(Text)
+    edits: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 engine = create_engine(DB_URL, future=True)
 SessionLocal = sessionmaker(engine, expire_on_commit=False)

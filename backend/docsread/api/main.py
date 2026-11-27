@@ -19,8 +19,9 @@ from sqlalchemy import func, or_, select
 from ..editor.convert import document_to_editor
 from ..ingest.pipeline import ingest_file
 from ..config import ASSET_DIR, DOCS_DIR, ROOT
-from ..db import (Asset, Block, Document, Draft, LayoutItem, Module, ModuleOccurrence, ModuleVariant, Page,
+from ..db import (Asset, Block, Document, Draft, LayoutItem, Module, ModuleOccurrence, ModuleVariant, Page, PdfEdit,
                   SessionLocal, init_db)
+from ..pdfedit import engine as pdfedit
 
 init_db()
 app = FastAPI(title="docsRead")
@@ -392,6 +393,205 @@ def delete_draft(draft_id: int):
         s.delete(d)
         s.commit()
         return {"deleted": draft_id}
+
+
+# ── 원본 PDF 쪽 위에서 고치기(상품설명서) ─────────────────────────────────────────────
+def _pdf_path(d: Document) -> Path:
+    path = (DOCS_DIR.parent / d.rel_path) if (DOCS_DIR.parent / d.rel_path).exists() else DOCS_DIR / d.rel_path
+    if not path.exists():
+        raise HTTPException(404, "원본 PDF 가 없습니다")
+    return path
+
+
+def _pdfedit_row(e: PdfEdit) -> dict:
+    return {"id": e.id, "document_id": e.document_id, "title": e.title, "n_edits": len(e.edits or []),
+            "updated_at": e.updated_at.isoformat() + "Z"}
+
+
+def _clean_edits(raw) -> list[dict]:
+    """받은 고침 목록을 정해진 모양으로만 남긴다."""
+    if not isinstance(raw, list) or len(raw) > 5000:
+        raise HTTPException(422, "edits 는 목록이어야 합니다")
+    out = []
+    for e in raw:
+        try:
+            if "op" in e:
+                if e["op"] not in ("dup", "del") or e["scope"] not in ("page", "table"):
+                    raise ValueError
+                row = {"page": int(e["page"]), "op": e["op"], "id": int(e["id"]), "scope": e["scope"],
+                       **{k: float(e[k]) for k in ("y0", "y1", "x0", "x1", "ya", "yb")}}
+            elif "span" in e:
+                row = {"page": int(e["page"]), "span": int(e["span"]), "text": str(e["text"])[:2000].replace("\n", " ")}
+                if isinstance(e.get("was"), str):
+                    row["was"] = e["was"]
+                if e.get("align") in ("left", "center", "right"):
+                    row["align"] = e["align"]
+                if e.get("row"):
+                    row["row"] = int(e["row"])
+            else:
+                if not re.fullmatch(r"[0-9a-f]{64}", str(e["asset"])):
+                    raise ValueError
+                row = {"page": int(e["page"]), "image": int(e["image"]), "asset": e["asset"]}
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(422, "edits 항목의 모양이 맞지 않습니다")
+        out.append(row)
+    # 없어진 행(복제 취소)의 글자 고침은 버린다
+    rows = {e["id"] for e in out if e.get("op") == "dup"}
+    return [e for e in out if not e.get("row") or e["row"] in rows]
+
+
+@app.get("/api/pdfedits/fonts")
+def pdfedit_fonts():
+    """다시 쓰기에 쓸 글꼴이 준비됐는지."""
+    ready = pdfedit.fonts_ready()
+    return {"ready": len(ready) == len(pdfedit.WEIGHTS), "weights": ready}
+
+
+@app.get("/api/pdfedits")
+def list_pdfedits():
+    with SessionLocal() as s:
+        return [_pdfedit_row(e) for e in s.scalars(select(PdfEdit).order_by(PdfEdit.updated_at.desc()))]
+
+
+@app.post("/api/pdfedits")
+def create_pdfedit(payload: dict = Body(...)):
+    with SessionLocal() as s:
+        doc = _get_doc(s, int(payload.get("document_id") or 0))
+        _pdf_path(doc)
+        e = PdfEdit(document_id=doc.id, title=f"{doc.product or doc.filename} (쪽 편집)", edits=[])
+        s.add(e)
+        s.commit()
+        return _pdfedit_row(e)
+
+
+def _get_pdfedit(s, edit_id: int) -> PdfEdit:
+    e = s.get(PdfEdit, edit_id)
+    if e is None:
+        raise HTTPException(404, "쪽 편집 문서를 찾을 수 없습니다")
+    return e
+
+
+def _pdfedit_view(path: Path, edits: list[dict]) -> dict:
+    """화면용: 쪽마다 고칠 수 있는 글자 조각·그림(행 조작 뒤 위치, pt)과 알림."""
+    pages = []
+    with pymupdf.open(path) as pdf:
+        for pno, page in enumerate(pdf):
+            spans = pdfedit.page_spans(page)
+            aligns = pdfedit.guess_aligns(page, spans, pdfedit.line_groups(spans), pdfedit._edges(page))
+            shown, images = pdfedit.layout(page, spans, pdfedit.page_images(page), edits, pno)
+            pages.append({
+                "width": page.rect.width, "height": page.rect.height,
+                "spans": [{"id": sp["id"], "row": sp["row"], "t": sp["t"], "b": [round(v, 2) for v in sp["view"]],
+                           "font": sp["font"], "size": round(sp["size"], 2), "color": f"#{sp['color']:06x}",
+                           "k": round(sp["k"], 3), "track": round(sp["track"] / sp["size"], 3),
+                           "editable": sp["editable"], "subst": sp["subst"], "align": aligns[sp["id"]]}
+                          for sp in shown],
+                "images": [{"xref": im["xref"], "b": [round(v, 2) for v in im["view"]], "w": im["w"], "h": im["h"],
+                            "ratio": round(im["ratio"], 3), "rotated": im["rotated"]} for im in images]})
+    report = []
+    if edits:
+        pdf, report, _ = pdfedit.render(path, edits)
+        pdf.close()
+    return {"edits": edits, "pages": pages, "report": report}
+
+
+@app.get("/api/pdfedits/{edit_id}")
+def get_pdfedit(edit_id: int):
+    with SessionLocal() as s:
+        e = _get_pdfedit(s, edit_id)
+        doc = _get_doc(s, e.document_id)
+        row, edits, path = _pdfedit_row(e), list(e.edits or []), _pdf_path(doc)
+        row["doc"] = {"id": doc.id, "product": doc.product, "filename": doc.filename, "doc_type": doc.doc_type}
+    return {**row, **_pdfedit_view(path, edits)}
+
+
+@app.put("/api/pdfedits/{edit_id}")
+def save_pdfedit(edit_id: int, payload: dict = Body(...)):
+    with SessionLocal() as s:
+        e = _get_pdfedit(s, edit_id)
+        if "title" in payload:
+            e.title = str(payload["title"])[:200] or e.title
+        if "edits" in payload:
+            e.edits = _clean_edits(payload["edits"])
+        e.updated_at = datetime.utcnow()
+        path, edits = _pdf_path(_get_doc(s, e.document_id)), list(e.edits or [])
+        s.commit()
+        row = _pdfedit_row(e)
+    return {**row, **_pdfedit_view(path, edits)}
+
+
+@app.post("/api/pdfedits/{edit_id}/rows")
+def pdfedit_row(edit_id: int, payload: dict = Body(...)):
+    """표 행 추가·삭제. {"page", "span", "row"(복제한 행이면 그 id), "op": "dup"|"del"} — 고른 글자가 놓인 행이 대상."""
+    op = payload.get("op")
+    if op not in ("dup", "del"):
+        raise HTTPException(422, "op 는 dup 또는 del 입니다")
+    with SessionLocal() as s:
+        e = _get_pdfedit(s, edit_id)
+        path, edits = _pdf_path(_get_doc(s, e.document_id)), list(e.edits or [])
+        pno, sid, row = int(payload.get("page", 0)), int(payload.get("span", -1)), int(payload.get("row") or 0)
+        if op == "del" and row:      # 추가했던 행을 지움 = 그 추가를 취소
+            edits = [x for x in edits if not (x.get("op") == "dup" and x["id"] == row) and x.get("row") != row]
+        else:
+            with pymupdf.open(path) as pdf:
+                if not 0 <= pno < len(pdf):
+                    raise HTTPException(404, "페이지를 찾을 수 없습니다")
+                sp = next((x for x in pdfedit.page_spans(pdf[pno]) if x["id"] == sid), None)
+                band = pdfedit.find_row(pdf[pno], sp) if sp else None
+            if band is None:
+                raise HTTPException(422, "표의 행을 찾지 못했습니다. 가로줄로 나뉜 표 안의 글자를 고르세요")
+            if op == "del" and any(x.get("op") == "del" and x["page"] == pno and abs(x["y0"] - band["y0"]) < 0.1
+                                   and abs(x["x0"] - band["x0"]) < 0.1 for x in edits):
+                raise HTTPException(409, "이미 지운 행입니다")
+            new_id = max([x["id"] for x in edits if "op" in x], default=0) + 1
+            edits.append({"page": pno, "op": op, "id": new_id, **band})
+        e.edits = _clean_edits(edits)
+        e.updated_at = datetime.utcnow()
+        edits = list(e.edits)
+        s.commit()
+        out = _pdfedit_row(e)
+    return {**out, **_pdfedit_view(path, edits)}
+
+
+@app.delete("/api/pdfedits/{edit_id}")
+def delete_pdfedit(edit_id: int):
+    with SessionLocal() as s:
+        s.delete(_get_pdfedit(s, edit_id))
+        s.commit()
+        return {"deleted": edit_id}
+
+
+@app.get("/api/pdfedits/{edit_id}/pages/{page_no}/preview.png")
+def pdfedit_preview(edit_id: int, page_no: int, dpi: int = Query(200, ge=72, le=400)):
+    """고친 내용을 입힌 쪽 그림(실제 PDF 를 그린 것이라 내려받는 결과와 같다)."""
+    with SessionLocal() as s:
+        e = _get_pdfedit(s, edit_id)
+        path, edits = _pdf_path(_get_doc(s, e.document_id)), list(e.edits or [])
+    pdf, _, _ = pdfedit.render(path, edits)
+    try:
+        if not 0 <= page_no < len(pdf):
+            raise HTTPException(404, "페이지를 찾을 수 없습니다")
+        png = pdf[page_no].get_pixmap(dpi=dpi).tobytes("png")
+    finally:
+        pdf.close()
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/pdfedits/{edit_id}/download.pdf")
+def pdfedit_download(edit_id: int):
+    from urllib.parse import quote
+
+    with SessionLocal() as s:
+        e = _get_pdfedit(s, edit_id)
+        path, edits, title = _pdf_path(_get_doc(s, e.document_id)), list(e.edits or []), e.title
+    pdf, _, composed = pdfedit.render(path, edits)
+    try:
+        data = pdfedit.to_bytes(pdf, composed)
+    finally:
+        pdf.close()
+    name = quote(re.sub(r'[\\/:*?"<>|]', "_", title) + ".pdf")
+    return Response(data, media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}", "Cache-Control": "no-store"})
 
 
 _dist = ROOT / "frontend" / "dist"

@@ -4,6 +4,7 @@ import BlockView from "./BlockView";
 import EditorView from "./EditorView";
 import ModuleView from "./ModuleView";
 import PageCanvas from "./PageCanvas";
+import PageEditView from "./PageEditView";
 import UploadPanel from "./UploadPanel";
 import TooltipLayer from "./Tooltip";
 import type { Block, BlockModules, DocDetail, DocRow } from "./types";
@@ -27,8 +28,9 @@ export default function App() {
   const [page, setPage] = useState(0);
   const [panes, setPanes] = useState<Pane[]>(["original", "layout"]);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"docs" | "modules" | "editor">("docs");
+  const [mode, setMode] = useState<"docs" | "modules" | "editor" | "pageedit">("docs");
   const [editFrom, setEditFrom] = useState<number | null>(null);
+  const [pageEditFrom, setPageEditFrom] = useState<number | null>(null);
   const [blockModules, setBlockModules] = useState<BlockModules>({});
   const [moduleId, setModuleId] = useState<number | null>(null);
   const [reload, setReload] = useState(0);
@@ -75,12 +77,14 @@ export default function App() {
         <button className={mode === "docs" ? "on" : ""} onClick={() => setMode("docs")}>문서</button>
         <button className={mode === "modules" ? "on" : ""} onClick={() => setMode("modules")}>공통 모듈</button>
         <button className={mode === "editor" ? "on" : ""} onClick={() => setMode("editor")}>편집기</button>
+        <button className={mode === "pageedit" ? "on" : ""} onClick={() => setMode("pageedit")} title="상품설명서: 원본 PDF 쪽 위에서 글자·그림만 고칩니다">쪽 편집</button>
       </div>
       {mode === "docs" && <span>{docs.length}건</span>}
     </nav>
     <div className="app">
       {mode === "modules" && <ModuleView key={moduleId ?? "none"} initial={moduleId} onOpenDoc={openDoc} />}
       {mode === "editor" && <EditorView startFrom={editFrom} onStarted={() => setEditFrom(null)} />}
+      {mode === "pageedit" && <PageEditView startFrom={pageEditFrom} onStarted={() => setPageEditFrom(null)} />}
       {mode === "docs" && <>
       <aside>
         <div className="filters">
@@ -129,9 +133,15 @@ export default function App() {
                 글자 {doc.stats.chars.toLocaleString()} · 표 {doc.stats.tables} · 이미지 {doc.stats.images}
                 {doc.doc_type === "terms" && ` · 조 ${doc.stats.articles}`}
               </div>
-              <button className="primary" onClick={() => { setEditFrom(doc.id); setMode("editor"); }} title="이 문서를 복제해 편집기로 엽니다(원본은 그대로)">
-                이 문서로 편집 시작
-              </button>
+              {doc.doc_type === "brochure" ? (
+                <button className="primary" onClick={() => { setPageEditFrom(doc.id); setMode("pageedit"); }} title="원본 PDF 쪽 위에서 글자·그림만 고칩니다(원본은 그대로, 글꼴·크기·장평·자간 유지)">
+                  원본 위에서 고치기
+                </button>
+              ) : (
+                <button className="primary" onClick={() => { setEditFrom(doc.id); setMode("editor"); }} title="이 문서를 복제해 편집기로 엽니다(원본은 그대로)">
+                  이 문서로 편집 시작
+                </button>
+              )}
               <div className="seg">
                 {PANES.map((p) => (
                   <button key={p.key} className={panes.includes(p.key) ? "on" : ""} title={p.hint} onClick={() => toggle(p.key)}>
